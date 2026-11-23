@@ -29,6 +29,7 @@
     "src",
     "web",
     "docs",
+    "tests",
     "cordis.patch.yml",
     "README.md",
     "LICENSE",
@@ -37,7 +38,8 @@
   "scripts": {
     "start": "node src/server.mjs",
     "test": "node tests/run-tests.mjs",
-    "check": "node tests/run-tests.mjs"
+    "check": "node tests/run-tests.mjs",
+    "smoke": "node tests/plugin-smoke.mjs"
   },
   "engines": {
     "dsh": ">=0.1.7-rc.1",
