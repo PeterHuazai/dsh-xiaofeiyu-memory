@@ -149,20 +149,35 @@ export function exportBundle(store, input) {
   const parts = o.partition
     ? [partitionByName(store, o.partition)].filter(Boolean)
     : db.prepare('SELECT * FROM partition ORDER BY created_at ASC').all();
-  const bundle = { format: 'xiaofeiyu-memory-bundle', version: 1, exportedAt: nowMs(), partitions: [], items: [], tasks: [], reports: [], events: [] };
+  const inc = Array.isArray(o.include) && o.include.length ? o.include : null;
+  const want = function (k) { return !inc || inc.indexOf(k) >= 0; };
+  const bundle = { format: 'xiaofeiyu-memory-bundle', version: 1, exportedAt: nowMs(), partitions: [], items: [], tasks: [], reports: [], events: [], guardEvents: [] };
   for (const part of parts) {
     bundle.partitions.push({ id: part.id, name: part.name, title: part.title, description: part.description, created_at: part.created_at });
-    const items = db.prepare("SELECT * FROM item WHERE partition_id = ? AND state != 'deleted' ORDER BY created_at ASC").all(part.id);
-    for (const it of items) bundle.items.push(Object.assign({}, it, { partition: part.name }));
-    for (const t of db.prepare('SELECT * FROM task WHERE partition_id = ? ORDER BY started_at ASC').all(part.id)) {
-      bundle.tasks.push(Object.assign({}, t, { partition: part.name }));
+    if (want('items')) {
+      const items = db.prepare("SELECT * FROM item WHERE partition_id = ? AND state != 'deleted' ORDER BY created_at ASC").all(part.id);
+      for (const it of items) bundle.items.push(Object.assign({}, it, { partition: part.name }));
     }
-    for (const r of db.prepare('SELECT * FROM report WHERE partition_id = ? AND deleted_at IS NULL ORDER BY created_at ASC').all(part.id)) {
-      bundle.reports.push(Object.assign({}, r, { partition: part.name, markdown: fs.existsSync(r.path) ? fs.readFileSync(r.path, 'utf8') : '' }));
+    if (want('tasks')) {
+      for (const t of db.prepare('SELECT * FROM task WHERE partition_id = ? ORDER BY started_at ASC').all(part.id)) {
+        bundle.tasks.push(Object.assign({}, t, { partition: part.name }));
+      }
     }
-    if (o.withEvents) {
+    if (want('reports')) {
+      for (const r of db.prepare('SELECT * FROM report WHERE partition_id = ? AND deleted_at IS NULL ORDER BY created_at ASC').all(part.id)) {
+        bundle.reports.push(Object.assign({}, r, { partition: part.name, markdown: fs.existsSync(r.path) ? fs.readFileSync(r.path, 'utf8') : '' }));
+      }
+    }
+    if (o.withEvents && want('events')) {
       for (const e of db.prepare('SELECT * FROM recall_event WHERE partition_id = ? ORDER BY ts ASC').all(part.id)) {
         bundle.events.push(Object.assign({}, e, { partition: part.name }));
+      }
+    }
+    if (o.withGuardEvents && want('guardEvents')) {
+      for (const g of db.prepare('SELECT * FROM guard_event WHERE partition_id = ? AND deleted_at IS NULL ORDER BY ts ASC').all(part.id)) {
+        const g2 = Object.assign({}, g, { partition: part.name });
+        g2.reasons = JSON.parse(g.reasons || '[]');
+        bundle.guardEvents.push(g2);
       }
     }
   }

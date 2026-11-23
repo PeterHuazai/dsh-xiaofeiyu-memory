@@ -429,7 +429,7 @@ export function overview(store) {
   const totals = db.prepare("SELECT COUNT(*) AS n FROM item WHERE state = 'active'").get();
   const dormant = db.prepare("SELECT COUNT(*) AS n FROM item WHERE state = 'dormant'").get();
   const ev = db.prepare('SELECT COUNT(*) AS n FROM recall_event').get();
-  const guards = db.prepare("SELECT level, COUNT(*) AS n FROM guard_event GROUP BY level").all();
+  const guards = db.prepare("SELECT level, COUNT(*) AS n FROM guard_event WHERE deleted_at IS NULL GROUP BY level").all();
   const guardMap = { info: 0, warn: 0, block: 0 };
   for (const g of guards) guardMap[g.level] = Number(g.n);
   const shadow = store.shadow.size();

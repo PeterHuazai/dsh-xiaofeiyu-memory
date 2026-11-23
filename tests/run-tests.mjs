@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import zlib from 'node:zlib';
 
 const TMP = path.join(os.tmpdir(), 'xfy-mem-tests-' + process.pid);
 fs.rmSync(TMP, { recursive: true, force: true });
@@ -10,6 +11,7 @@ const { openStore, backup, integrity, rebuildFromShadow, ShadowLog } = await imp
 const engine = await import('../src/engine.mjs');
 const tasks = await import('../src/tasks.mjs');
 const guard = await import('../src/guard.mjs');
+const harness = await import('../src/harness.mjs');
 
 const store = openStore({ root: TMP });
 let pass = 0, fail = 0;
@@ -386,6 +388,83 @@ const hlStore = xfy.health(store, {});
 ok(hlStore.counts.backups >= 1 && hlStore.storage.backupAgeHours !== null, 'health 数得到 backups（路径用 store.backupDir）', { backups: hlStore.counts.backups, age: hlStore.storage.backupAgeHours });
 ok(hlStore.storage.shadowBytes > 0, 'health 数得到影子日志字节数（路径用 store.shadowDir）', hlStore.storage.shadowBytes);
 
+// 31 守卫记录：source 区分 + 软删 / 恢复 / 清空模拟
+const gPartId = engine.partitionByName(store, 'p-tools').id;
+const gSim = guard.checkGuard(store, { partition: 'p-tools', contextTokens: 180000, source: 'simulated' });
+const gReal = guard.checkGuard(store, { partition: 'p-tools', contextTokens: 180000 });
+ok(gSim.source === 'simulated' && gReal.source === 'real', '守卫记录区分模拟与真实来源', { sim: gSim.source, real: gReal.source });
+const glSim = guard.listGuardEvents(store, { partitionId: gPartId, source: 'simulated' });
+ok(glSim.total === 1 && glSim.bySource.simulated === 1, 'listGuardEvents 能按来源筛选', { total: glSim.total, by: glSim.bySource });
+const gClear = guard.deleteGuardEvents(store, { onlySimulated: true });
+ok(gClear.deleted === 1 && gClear.simulated === 1 && gClear.hard === false, '清空模拟记录走软删', gClear);
+const glAfter = guard.listGuardEvents(store, { partitionId: gPartId });
+ok(!glAfter.events.some(function (e) { return e.id === gSim.id; }), '软删后默认列表不再出现该记录');
+const glTrash = guard.listGuardEvents(store, { partitionId: gPartId, deleted: true });
+ok(glTrash.events.some(function (e) { return e.id === gSim.id && e.deleted === true; }), '回收视图能看到软删记录');
+const gBack = guard.restoreGuardEvents(store, { id: gSim.id });
+ok(gBack.restored === 1, '恢复软删的守卫记录', gBack);
+guard.deleteGuardEvents(store, { id: gSim.id });
+const gPurge = guard.purgeGuardEvents(store, { olderThanDays: 0 });
+ok(gPurge.purged >= 1, '彻底清理超期软删记录', gPurge);
+const gGone = store.db.prepare('SELECT id FROM guard_event WHERE id = ?').get(gSim.id);
+ok(!gGone, 'purge 之后库里没有该记录');
+eq(guard.listGuardEvents(store, { partitionId: gPartId }).bySource.real >= 1, true, '真实记录不受模拟清理影响');
+
+// 32 硬删墓碑能挡住影子日志重建
+const TMP2 = path.join(os.tmpdir(), 'xfy-mem-rebuild-' + process.pid);
+fs.rmSync(TMP2, { recursive: true, force: true });
+fs.mkdirSync(TMP2, { recursive: true });
+const store2 = openStore({ root: TMP2 });
+guard.checkGuard(store2, { partition: 'rb', contextTokens: 1000 });
+const keepId = guard.checkGuard(store2, { partition: 'rb', contextTokens: 2000 }).id;
+const killId = guard.checkGuard(store2, { partition: 'rb', contextTokens: 3000 }).id;
+guard.deleteGuardEvents(store2, { id: killId, hard: true });
+store2.close();
+const rbLog = rebuildFromShadow(TMP2);
+const store2b = openStore({ root: TMP2 });
+const left = store2b.db.prepare('SELECT id FROM guard_event ORDER BY ts ASC').all().map(function (r) { return r.id; });
+ok(left.indexOf(killId) < 0 && left.indexOf(keepId) >= 0, '影子日志重建尊重硬删墓碑', { left: left, killId: killId, applied: rbLog.applied });
+store2b.close();
+try { fs.rmSync(TMP2, { recursive: true, force: true }); } catch (e) { }
+
+// 33 DSH 会话多帧 zstd：扫描 + 预演 + 确认导入
+const HS = path.join(TMP, 'hsess');
+const hDir = path.join(HS, '--G-demo-proj--', 'session-h1');
+fs.mkdirSync(hDir, { recursive: true });
+const ev = [
+  { type: 'session', id: 'session-h1', version: 4, cwd: 'G:\\demo\\proj', createdAt: 1700000000000 },
+  { type: 'session/title', seq: 1, time: 1700000001000, data: { title: '# 任务：把鱼缸做出来' } },
+  { type: 'user/message', seq: 2, time: 1700000002000, data: { content: [{ type: 'text', text: '把鱼缸做成能喂的' }] } },
+  { type: 'assistant/message', seq: 3, time: 1700000003000, data: { message: { content: [{ type: 'text', text: '鱼缸做好了，5 条鱼都能喂' }] } } }
+];
+const line1 = JSON.stringify(ev[0]) + '\n' + JSON.stringify(ev[1]) + '\n';
+const line2 = JSON.stringify(ev[2]) + '\n' + JSON.stringify(ev[3]) + '\n';
+const z1 = zlib.zstdCompressSync(Buffer.from(line1, 'utf8'));
+const z2 = zlib.zstdCompressSync(Buffer.from(line2, 'utf8'));
+fs.writeFileSync(path.join(hDir, 'session.v4.jsonl.zstd'), Buffer.concat([z1, z2]));
+const decoded = harness.decodeZstdFrames(fs.readFileSync(path.join(hDir, 'session.v4.jsonl.zstd')));
+ok(decoded.indexOf('把鱼缸做成能喂的') >= 0 && decoded.indexOf('5 条鱼都能喂') >= 0, '多帧 zstd 全部解出（不止第一帧）');
+const scan = harness.scanHarness(store, { root: HS });
+ok(scan.totals.sessions === 1 && scan.projects[0].sessionCount === 1, '扫描出 1 个项目 1 个会话', scan.totals);
+const hs0 = scan.projects[0].sessions[0];
+ok(hs0.title.indexOf('鱼缸') >= 0 && hs0.events === 4, '会话标题与事件数可用', { title: hs0.title, events: hs0.events });
+const dryImport = harness.importHarness(store, { root: HS, sessions: ['session-h1'] });
+ok(dryImport.dryRun === true && dryImport.wouldImport === 1, '未确认时只预演不写库', dryImport);
+eq(store.db.prepare("SELECT COUNT(*) AS n FROM item WHERE source = 'harness:session-h1'").get().n, 0, '预演没有写入记忆');
+const realImport = harness.importHarness(store, { root: HS, sessions: ['session-h1'], confirmed: true });
+ok(realImport.dryRun === false && realImport.imported === 1, '确认后写入 1 条会话记忆', realImport);
+const hItem = store.db.prepare("SELECT * FROM item WHERE source = 'harness:session-h1'").get();
+ok(!!hItem && String(hItem.body).indexOf('把鱼缸做成能喂的') >= 0, '会话记忆正文含首条需求', hItem && String(hItem.body).slice(0, 60));
+const againImport = harness.importHarness(store, { root: HS, sessions: ['session-h1'], confirmed: true });
+ok(againImport.imported === 0 && againImport.skipped === 1, '重复导入被跳过', againImport);
+
+// 34 导出范围可选
+tasks.writeReport(store, { partition: 'p-tools', title: '导出范围测试汇报', summary: '一句话结果' });
+const onlyReports = tasks.exportBundle(store, { partition: 'p-tools', include: ['reports'] });
+ok(onlyReports.items.length === 0 && onlyReports.reports.length >= 1, 'include 只要汇报时条目不导出', { items: onlyReports.items.length, reports: onlyReports.reports.length });
+const withGuards = tasks.exportBundle(store, { partition: 'p-tools', withGuardEvents: true });
+ok(Array.isArray(withGuards.guardEvents) && withGuards.guardEvents.length >= 1, 'withGuardEvents 导出守卫记录', withGuards.guardEvents.length);
+ok(Array.isArray(withGuards.guardEvents[0].reasons), '守卫记录 reasons 已解析成数组');
 console.log('\n通过 ' + pass + ' / 失败 ' + fail);
 if (fail) { console.log(failures.join('\n')); process.exit(1); }
 // Windows 上数据库句柄未关时删不掉临时目录

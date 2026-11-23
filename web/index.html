@@ -493,6 +493,47 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
     .detail-extra{grid-template-columns:1fr}
     #pnl-search td.snippet{max-width:200px}
   }
+  /* 守卫筛选 / 批量 / 全局检索 / DSH 会话 */
+  .filterbar{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:0 0 10px}
+  .filterbar .seg{flex:none}
+  .filterbar select{min-height:26px;font-size:11.5px;padding:2px 6px}
+  .filterbar .sp{flex:1;min-width:0}
+  th.ckcol,td.ckcol{width:30px;text-align:center;padding-left:6px;padding-right:4px}
+  td.ckcol input,th.ckcol input{margin:0;vertical-align:middle}
+  .batchbar{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:0 0 10px;padding:7px 10px;
+    border:1px solid color-mix(in srgb,var(--gold) 40%,transparent);background:var(--gold-dim);border-radius:var(--r);font-size:11.5px}
+  .batchbar b{color:var(--gold-2);font-family:var(--font-mono)}
+  .palette-wrap{position:fixed;inset:0;z-index:90;background:var(--shade);display:flex;
+    align-items:flex-start;justify-content:center;padding:12vh 16px 16px}
+  .palette{width:min(620px,100%);max-height:70vh;display:flex;flex-direction:column;overflow:hidden;
+    background:var(--panel);border:1px solid var(--line-2);border-radius:var(--r-lg);box-shadow:0 18px 50px rgba(0,0,0,.4)}
+  .palette input[type=search]{width:100%;border:0;border-bottom:1px solid var(--line);border-radius:0;
+    background:transparent;padding:12px 14px;font-size:14px}
+  .palette .plist{list-style:none;margin:0;padding:5px;overflow:auto;min-height:0}
+  .palette .plist li{padding:7px 10px;border-radius:var(--r);cursor:pointer;display:flex;gap:8px;
+    align-items:baseline;font-size:12.5px}
+  .palette .plist li .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .palette .plist li .mt{font-family:var(--font-mono);font-size:10.5px;color:var(--ink-3);white-space:nowrap}
+  .palette .plist li.on{background:var(--panel-3);box-shadow:inset 2px 0 0 var(--gold)}
+  .palette .pfoot{border-top:1px solid var(--line);padding:6px 12px;font-size:10.5px;color:var(--ink-3);
+    display:flex;gap:10px;flex-wrap:wrap}
+  .palette .pfoot kbd{font-family:var(--font-mono);border:1px solid var(--line-2);border-radius:3px;padding:0 4px}
+  .scope-grid{display:flex;gap:6px 14px;flex-wrap:wrap;margin:9px 0;font-size:11.5px;color:var(--ink-2)}
+  .scope-grid label{display:inline-flex;gap:5px;align-items:center}
+  .hlist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
+  .hproj{border:1px solid var(--line);border-radius:var(--r);background:var(--panel-2);overflow:hidden}
+  .hproj>.hd{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 11px;border-bottom:1px solid var(--line)}
+  .hproj>.hd .nm{font-weight:600;font-size:12.5px}
+  .hproj>.hd .sp{flex:1;min-width:0}
+  .hsess{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:5px 11px;
+    border-bottom:1px dotted var(--line);font-size:11.5px}
+  .hsess:last-child{border-bottom:0}
+  .hsess .ttl{flex:1 1 200px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .hsess .mt{font-family:var(--font-mono);font-size:10.5px;color:var(--ink-3);white-space:nowrap}
+  .hsess.empty{opacity:.5}
+  .hres{margin-top:10px;border:1px solid var(--line);border-radius:var(--r);padding:9px 11px;
+    background:var(--panel-2);font-size:12px;line-height:1.7}
+  .hres b{color:var(--teal-2)}
 </style>
 </head>
 <body>
@@ -571,11 +612,21 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
         </select>
       </div>
     </div>
+    <div class="batchbar" id="batchBar" hidden>
+      <b id="batchCount">0</b><span>条已选</span><span id="batchHint" class="hint"></span>
+      <span class="sp" style="flex:1"></span>
+      <button class="btn btn-xs btn-gold" data-action="batch-pin" title="批量钉住当前所选">钉住</button>
+      <button class="btn btn-xs" data-action="batch-unpin" title="批量取消钉住">取消钉住</button>
+      <button class="btn btn-xs btn-danger" data-action="batch-delete" title="批量软删除到回收站">删除</button>
+      <button class="btn btn-xs" data-action="batch-restore" title="把已删除的所选条目恢复回来">恢复</button>
+      <button class="btn btn-xs btn-ghost" data-action="batch-clear">清空选择</button>
+    </div>
     <div class="tbl-scroll">
       <table class="items">
         <thead>
           <tr>
-            <th style="min-width:210px">标题</th>
+            <th class="ckcol"><input type="checkbox" id="selAll" aria-label="全选当前列表"></th>
+            <th style="min-width:200px">标题</th>
             <th style="width:92px">类型</th>
             <th style="width:84px">重要度</th>
             <th style="width:88px">状态</th>
@@ -586,7 +637,7 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
           </tr>
         </thead>
         <tbody id="itemsBody">
-          <tr><td colspan="8"><div class="empty"><b>装载中</b></div></td></tr>
+          <tr><td colspan="9"><div class="empty"><b>装载中</b></div></td></tr>
         </tbody>
       </table>
     </div>
@@ -753,11 +804,37 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
         <span class="head-rule"></span>
         <span class="head-note" id="guardNote">最近 40 条事件</span>
       </div>
+      <div class="filterbar">
+        <div class="seg" id="guardView" role="tablist" aria-label="守卫视图">
+          <button type="button" class="on" role="tab" aria-selected="true" data-action="guard-view" data-view="live">现行</button>
+          <button type="button" role="tab" aria-selected="false" data-action="guard-view" data-view="trash">回收站</button>
+        </div>
+        <select id="guardLevel" aria-label="按等级过滤">
+          <option value="all">全部等级</option>
+          <option value="ok">ok</option>
+          <option value="warn">warn</option>
+          <option value="block">block</option>
+        </select>
+        <select id="guardSource" aria-label="按来源过滤">
+          <option value="all">全部来源</option>
+          <option value="real">真实</option>
+          <option value="simulated">模拟</option>
+        </select>
+        <span class="sp"></span>
+        <button class="btn btn-xs btn-danger" id="guardClearSim" data-action="guard-clear-sim" title="只删除 source=simulated 的守卫记录（软删除）">清空模拟记录</button>
+        <button class="btn btn-xs btn-danger" id="guardPurgeAll" data-action="guard-purge-all" hidden title="永久删除回收站里的全部守卫记录">彻底清理回收站</button>
+      </div>
       <div id="guardList"><div class="empty"><b>守卫事件装载中</b></div></div>
+      <div class="pager">
+        <span id="guardStats">—</span>
+        <span class="sp"></span>
+        <button class="btn btn-xs" data-action="guard-page" data-delta="-1" id="guardPrev" disabled>上一页</button>
+        <button class="btn btn-xs" data-action="guard-page" data-delta="1" id="guardNext" disabled>下一页</button>
+      </div>
       <form class="sim" id="guardForm">
         <div class="field">
           <label for="guardTokens">上下文 tokens</label>
-          <input type="number" id="guardTokens" value="168000" min="0" max="4000000" step="1000" style="width:128px">
+          <input type="number" id="guardTokens" value="168000" min="0" max="4000000" step="1" style="width:128px">
         </div>
         <button class="btn btn-gold" id="guardRun" type="submit">模拟检查</button>
         <span class="head-note" id="guardHint">POST /api/guard/check</span>
@@ -863,15 +940,41 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
           <h2 id="h-io">导入 / 导出</h2>
           <span class="head-rule"></span>
         </div>
+        <div class="scope-grid" id="exportScopes" aria-label="导出范围">
+          <label><input type="checkbox" data-scope="items" checked> 记忆条目</label>
+          <label><input type="checkbox" data-scope="tasks" checked> 任务</label>
+          <label><input type="checkbox" data-scope="reports" checked> 汇报</label>
+          <label><input type="checkbox" data-scope="events" checked> 召回事件</label>
+          <label><input type="checkbox" data-scope="guardEvents" checked> 守卫记录</label>
+        </div>
         <div class="io-row">
-          <button class="btn" id="exportBtn2">导出当前分区</button>
+          <button class="btn" id="exportBtn2">导出当前分区（按勾选范围）</button>
           <button class="btn" id="importBtn">导入 JSON</button>
           <input type="file" id="importFile" accept="application/json,.json" hidden>
         </div>
-        <p class="hint-line">导出走 <code>GET /api/export?partition=…</code>，直接落盘为 JSON。导入读取本地 bundle（format: xiaofeiyu-memory-bundle）后 <code>POST /api/import</code>，同 content_hash 条目会自动跳过。</p>
+        <p class="hint-line">导出走 <code>GET /api/export?partition=…&amp;include=items,tasks,reports,events,guardEvents&amp;withEvents=1&amp;withGuardEvents=1</code>，未勾选的数组会是空的。导入读取本地 bundle（format: xiaofeiyu-memory-bundle）后 <code>POST /api/import</code>，同 content_hash 条目会自动跳过。</p>
       </section>
     </div>
   </div>
+
+  <section class="panel" id="sec-harness" aria-labelledby="h-harness">
+    <div class="panel-head">
+      <span class="tick"></span>
+      <h2 id="h-harness">DSH 会话</h2>
+      <span class="head-rule"></span>
+      <span class="head-note" id="harnNote">GET /api/harness/scan</span>
+      <button class="btn btn-xs" data-action="harness-scan">扫描</button>
+      <button class="btn btn-xs btn-gold" data-action="harness-import">导入所选会话</button>
+    </div>
+    <div class="filterbar">
+      <input type="search" id="harnQ" placeholder="过滤项目 / 会话标题" aria-label="过滤项目或会话" style="width:220px">
+      <span class="head-note" id="harnSel">尚未扫描</span>
+      <span class="sp"></span>
+      <button class="btn btn-xs btn-ghost" data-action="harness-clear">清空勾选</button>
+    </div>
+    <div id="harnessList"><div class="empty"><b>尚未扫描 DSH 会话</b><span>点「扫描」读取项目与会话清单；空会话置灰不可选</span></div></div>
+    <div id="harnessResult"></div>
+  </section>
 </main>
 
 <div class="tip" id="tip" hidden></div>
@@ -895,6 +998,19 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
     <div class="acts">
       <button class="btn" data-action="modal-cancel">取消</button>
       <button class="btn btn-danger" id="modalOk">确认</button>
+    </div>
+  </div>
+</div>
+
+<div class="palette-wrap" id="paletteWrap" hidden>
+  <div class="palette" role="dialog" aria-modal="true" aria-label="全局检索">
+    <input type="search" id="paletteQ" placeholder="在当前分区里搜记忆…" autocomplete="off" aria-label="检索关键词">
+    <ul class="plist" id="paletteList" role="listbox" aria-label="检索结果"></ul>
+    <div class="pfoot">
+      <span><kbd>↑</kbd><kbd>↓</kbd> 选择</span>
+      <span><kbd>Enter</kbd> 打开详情</span>
+      <span><kbd>Esc</kbd> 关闭</span>
+      <span id="paletteMeta" style="margin-left:auto"></span>
     </div>
   </div>
 </div>
@@ -925,6 +1041,11 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
     hidden: { curve: {}, timeline: {} },
     day: null,
     filters: { q: '', kind: 'all', state: 'all', sort: 'retention', dir: 'desc' },
+    sel: {},
+    goneSel: {},
+    guardQ: { view: 'live', level: 'all', source: 'all', limit: 40, offset: 0, data: null, err: null, busy: false },
+    harn: { data: null, err: null, q: '', sel: {}, proj: {}, result: null, busy: false },
+    pal: { open: false, q: '', idx: 0, items: [], seq: 0, timer: null },
     guard: null,
     recycle: null,
     reports: null,
@@ -1231,7 +1352,8 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
       renderReports();
       renderCurve();
       loadTools();
-      return Promise.all([loadCurve(), loadRecycle(), loadReports(), loadCaption().catch(function () {})]);
+      S.guardQ.offset = 0;
+      return Promise.all([loadCurve(), loadRecycle(), loadReports(), loadCaption().catch(function () {}), loadGuard().catch(function () {})]);
     }).catch(function (err) {
       showBanner('无法读取 /api/state：' + (err && err.message ? err.message : err));
       if (!S.state) {
@@ -1332,6 +1454,7 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
     var stt = String(it.state || '');
     var tags = (it.tags || []).slice(0, 2);
     return '<tr class="row' + (open ? ' open' : '') + '" data-id="' + esc(it.id) + '" tabindex="0" aria-expanded="' + (open ? 'true' : 'false') + '">' +
+      '<td class="ckcol"><input type="checkbox" data-sel-item="' + esc(it.id) + '"' + (S.sel[it.id] ? ' checked' : '') + ' aria-label="选择这条记忆"></td>' +
       '<td><div class="cell-title">' + (it.pinned ? '<span class="pin" title="pinned">钉</span>' : '') +
         '<span class="t" title="' + esc(it.title) + '">' + esc(it.title || '(无标题)') + '</span>' +
         (tags.length ? '<span class="chip">' + esc(tags[0]) + '</span>' : '') + '</div></td>' +
@@ -1396,7 +1519,7 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
         detailExtraHtml(d) +
       '</div>';
     }
-    return '<tr class="detail-row" data-detail-for="' + esc(it.id) + '"><td colspan="8">' + inner + '</td></tr>';
+    return '<tr class="detail-row" data-detail-for="' + esc(it.id) + '"><td colspan="9">' + inner + '</td></tr>';
   }
 
   function detailExtraHtml(d) {
@@ -1405,7 +1528,7 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
 
   function renderItems() {
     var body = $('#itemsBody');
-    if (!S.state) { body.innerHTML = '<tr><td colspan="8">' + emptyBox('数据未就绪') + '</td></tr>'; return; }
+    if (!S.state) { body.innerHTML = '<tr><td colspan="9">' + emptyBox('数据未就绪') + '</td></tr>'; renderBatchBar(); return; }
     fillFilterOptions();
     var list = filteredItems();
     var total = (S.state.items || []).length;
@@ -1415,10 +1538,12 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
       d.textContent = th.dataset.sort === S.filters.sort ? (S.filters.dir === 'asc' ? '↑' : '↓') : '';
     });
     if (!list.length) {
-      body.innerHTML = '<tr><td colspan="8">' + emptyBox('没有匹配的条目', total ? '换个关键词或把筛选调回全部' : '这个分区还没有记忆') + '</td></tr>';
+      body.innerHTML = '<tr><td colspan="9">' + emptyBox('没有匹配的条目', total ? '换个关键词或把筛选调回全部' : '这个分区还没有记忆') + '</td></tr>';
+      renderBatchBar();
       return;
     }
     body.innerHTML = list.map(rowHtml).join('');
+    renderBatchBar();
   }
 
   function loadDetail(id) {
@@ -2355,27 +2480,58 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
   function guardDirective(e) {
     return ACTION_TEXT[e.action] || ('action: ' + (e.action || '—'));
   }
+  function guardWho(e) {
+    return e.source === 'simulated' ? '<span class="chip" style="border-color:var(--gold);color:var(--gold-2)">模拟</span>'
+      : '<span class="chip muted">真实</span>';
+  }
   function renderGuard() {
     var box = $('#guardList');
     if (!box) return;
-    var evs = (S.state && S.state.guardEvents) || [];
+    var q = S.guardQ;
+    var trash = q.view === 'trash';
+    var seg = $('#guardView');
+    if (seg) {
+      $$('button', seg).forEach(function (b) {
+        var on = b.dataset.view === q.view;
+        b.classList.toggle('on', on);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+    }
+    if ($('#guardLevel')) $('#guardLevel').value = q.level;
+    if ($('#guardSource')) $('#guardSource').value = q.source;
+    if ($('#guardPurgeAll')) $('#guardPurgeAll').hidden = !trash;
+    if ($('#guardClearSim')) $('#guardClearSim').hidden = trash;
     var note = $('#guardNote');
-    if (note) note.textContent = evs.length ? ('最近 ' + Math.min(evs.length, 40) + ' 条事件') : '暂无事件';
+    var d = q.data;
+    if (note) note.textContent = (trash ? '回收站' : '现行') + ' · ' + (d ? (d.total + ' 条') : '装载中');
+    if (q.err) { box.innerHTML = errBox('守卫事件读取失败', q.err, 'guard-list-retry'); updateGuardPager(); return; }
+    if (!d) { box.innerHTML = '<div class="empty"><b>守卫事件装载中</b></div>'; updateGuardPager(); return; }
+    var evs = d.events || [];
     if (!evs.length) {
-      box.innerHTML = emptyBox('还没有守卫事件', '用下面的模拟检查跑一次，就会写入一条 guard_event');
+      box.innerHTML = trash
+        ? emptyBox('守卫回收站是空的', '软删除的 guard_event 会先落在这里')
+        : emptyBox('没有匹配的守卫事件', '放宽来源 / 等级筛选，或用下面的模拟检查写一条');
+      updateGuardPager();
       return;
     }
-    box.innerHTML = '<ul class="list">' + evs.slice(0, 40).map(function (e) {
+    box.innerHTML = '<ul class="list">' + evs.map(function (e) {
       var lv = String(e.level || 'info');
       var reasons = parseJSONish(e.reasons, []);
+      var acts = trash
+        ? '<button class="btn btn-xs btn-gold" data-action="guard-restore" data-id="' + esc(e.id) + '" title="把这条件恢复到现行视图">恢复</button>' +
+          '<button class="btn btn-xs btn-danger" data-action="guard-purge" data-id="' + esc(e.id) + '" title="从数据库里彻底删除，不可恢复">彻底清理</button>'
+        : '<button class="btn btn-xs btn-danger" data-action="guard-del" data-id="' + esc(e.id) + '" title="软删除到守卫回收站">删除</button>';
       return '<li class="row-card">' +
         '<div class="top">' +
           '<span class="pill lv-' + esc(lv) + '">' + esc(LEVEL_LABEL[lv] || lv) + '</span>' +
           '<b>score ' + Number(e.score || 0).toFixed(3) + '</b>' +
+          guardWho(e) +
           '<span class="score">' + esc(dt(e.ts)) + '</span>' +
+          '<span style="flex:1"></span>' + acts +
         '</div>' +
         '<div class="meta">上下文 ' + num(e.context_tokens) + ' tokens · ' +
-          esc(rel(e.ts)) + (e.task_id ? ' · task ' + esc(e.task_id) : '') + '</div>' +
+          esc(rel(e.ts)) + (e.task_id ? ' · task ' + esc(e.task_id) : '') +
+          (e.deleted_at ? ' · 删除于 ' + esc(dt(e.deleted_at)) : '') + '</div>' +
         '<div class="reasons">' + (reasons.length
           ? reasons.map(function (r) { return '<span class="chip">' + esc(r) + '</span>'; }).join('')
           : '<span class="chip muted">无 reasons</span>') + '</div>' +
@@ -2383,6 +2539,90 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
           esc(guardDirective(e)) + '</div>' +
       '</li>';
     }).join('') + '</ul>';
+    updateGuardPager();
+  }
+
+  function updateGuardPager() {
+    var q = S.guardQ, d = q.data;
+    var stats = $('#guardStats');
+    var from = d && (d.events || []).length ? (Number(d.offset || 0) + 1) : 0;
+    var to = d ? (Number(d.offset || 0) + (d.events || []).length) : 0;
+    var bs = (d && d.bySource) || {};
+    if (stats) stats.textContent = d
+      ? ('共 ' + num(d.total) + ' 条 · 第 ' + from + '–' + to + ' 条 · 模拟 ' + num(bs.simulated || 0) + ' / 真实 ' + num(bs.real || 0))
+      : '—';
+    if ($('#guardPrev')) $('#guardPrev').disabled = !d || Number(d.offset || 0) <= 0;
+    if ($('#guardNext')) $('#guardNext').disabled = !d || (Number(d.offset || 0) + (d.events || []).length) >= Number(d.total || 0);
+  }
+
+  function loadGuard() {
+    var q = S.guardQ;
+    var url = '/api/guard/events?partition=' + encodeURIComponent(S.partition || '') +
+      '&level=' + encodeURIComponent(q.level) + '&source=' + encodeURIComponent(q.source) +
+      '&limit=' + q.limit + '&offset=' + q.offset + (q.view === 'trash' ? '&deleted=1' : '');
+    return api(url).then(function (d) {
+      q.data = d; q.err = null; renderGuard();
+    }).catch(function (err) {
+      q.err = err; q.data = null; renderGuard();
+    });
+  }
+
+  function guardAction(path, body, okMsg) {
+    return api(path, { method: 'POST', body: JSON.stringify(body) }).then(function (r) {
+      var parts = [];
+      ['deleted', 'restored', 'purged', 'ids'].forEach(function (k) {
+        if (r && r[k] !== undefined) parts.push(k + ' ' + (Array.isArray(r[k]) ? r[k].length : r[k]));
+      });
+      toast((okMsg || '已处理') + (parts.length ? '：' + parts.join(' · ') : ''));
+      if (body && body.id && S.guard && S.guard.id === body.id) {
+        var rb = $('#guardResult [data-action=guard-del]');
+        if (rb) { rb.disabled = true; rb.textContent = '已删除'; }
+        if ($('#guardHint')) $('#guardHint').textContent = '刚才那条记录已删除（id ' + body.id + '），可在回收站恢复';
+      }
+      return loadGuard().then(function () { return load(S.partition).catch(function () {}); });
+    }).catch(function (err) { toast('操作失败：' + err.message, 'bad'); throw err; });
+  }
+
+  function guardDelete(id) {
+    confirmBox({
+      title: '删除这条件守卫记录？', body: '软删除：会移进守卫回收站，可以再恢复。',
+      target: id, safe: true, okText: '删除'
+    }).then(function (r) { if (r.ok) guardAction('/api/guard/delete', { id: id }, '已删除'); });
+  }
+  function guardRestore(id) {
+    guardAction('/api/guard/restore', { id: id }, '已恢复');
+  }
+  function guardPurge(id) {
+    confirmBox({
+      title: '彻底清理这条守卫记录？', body: '不可撤销：直接从数据库删除，回收站里也不会再有。',
+      target: id, okText: '彻底清理'
+    }).then(function (r) { if (r.ok) guardAction('/api/guard/delete', { id: id, hard: true }, '已彻底清理'); });
+  }
+  function guardClearSimulated() {
+    confirmBox({
+      title: '清空所有模拟记录？', body: '只删除 source=simulated 的守卫记录（不碰真实记录），软删除后可在回收站恢复。',
+      safe: true, okText: '清空模拟记录'
+    }).then(function (r) { if (r.ok) guardAction('/api/guard/delete', { onlySimulated: true }, '已清空模拟记录'); });
+  }
+  function guardPurgeAll() {
+    confirmBox({
+      title: '彻底清理守卫回收站？', body: '不可撤销：回收站里所有已删除的守卫记录都会被永久删除（现行记录不受影响）。',
+      okText: '彻底清理'
+    }).then(function (r) {
+      if (!r.ok) return;
+      guardAction('/api/guard/purge', { olderThanDays: 0 }, '回收站已清空').then(function () {
+        if (S.guardQ.view === 'trash') loadGuard();
+      });
+    });
+  }
+  function guardSetView(view) {
+    S.guardQ.view = view; S.guardQ.offset = 0; loadGuard();
+  }
+  function guardPage(delta) {
+    var q = S.guardQ;
+    var next = Math.max(0, Number(q.offset || 0) + delta * q.limit);
+    if (next === q.offset) return;
+    q.offset = next; loadGuard();
   }
 
   function renderGuardResult() {
@@ -2404,6 +2644,7 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
       '<div class="hd">' +
         '<span class="pill lv-' + esc(lv) + '">' + esc(LEVEL_LABEL[lv] || lv) + '</span>' +
         '<span class="score">' + Number(d.score || 0).toFixed(3) + '</span>' +
+        (d.source ? '<span class="chip" style="border-color:var(--gold);color:var(--gold-2)">source ' + esc(d.source) + '</span>' : '') +
         '<span class="head-note">warn ≥ ' + th.warn + ' · block ≥ ' + th.block + '</span>' +
         '<span class="head-note" style="margin-left:auto">est ' + num(pget(d, 'metrics.estTokens') || 0) + ' tokens · ' +
           '召回 ' + num(pget(d, 'metrics.events') || 0) + ' / 命中 ' + num(pget(d, 'metrics.hits') || 0) + '</span>' +
@@ -2420,6 +2661,12 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
           '<span class="v">' + v.toFixed(2) + '</span></div>';
       }).join('') + '</div>' +
       '<div class="dir-note">' + esc(d.directive || '—') + '</div>' +
+      (d.id
+        ? '<div class="detail-actions" style="margin-top:9px">' +
+            '<span class="head-note">本次写入 ' + esc(d.id) + '</span>' +
+            '<button class="btn btn-xs btn-danger" data-action="guard-del" data-id="' + esc(d.id) + '">删除这条记录</button>' +
+          '</div>'
+        : '') +
       (d.trunk && d.trunk.length
         ? '<div class="head-note" style="margin-top:11px">主干记忆 ' + d.trunk.length + ' 条</div>' +
           '<ul class="trunk">' + d.trunk.map(function (t) {
@@ -2439,12 +2686,12 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
     var hint = $('#guardHint');
     btn.disabled = true;
     hint.textContent = '检查中…';
-    api('/api/guard/check', { method: 'POST', body: JSON.stringify({ partition: S.partition, contextTokens: Math.round(tokens) }) })
+    api('/api/guard/check', { method: 'POST', body: JSON.stringify({ partition: S.partition, contextTokens: Math.round(tokens), source: 'simulated' }) })
       .then(function (d) {
         S.guard = d;
         renderGuardResult();
-        hint.textContent = '已写入 1 条 guard_event';
-        toast('守卫检查完成：' + String(d.level) + ' · score ' + Number(d.score).toFixed(3), d.level === 'block' ? 'bad' : (d.level === 'warn' ? 'gold' : ''));
+        hint.textContent = '已写入 1 条 source=simulated 的 guard_event' + (d && d.id ? '（' + d.id + '）' : '');
+        toast('模拟检查完成：' + String(d.level) + ' · score ' + Number(d.score).toFixed(3) + ' · source ' + String(d.source || 'simulated'), d.level === 'block' ? 'bad' : (d.level === 'warn' ? 'gold' : ''));
         return load(S.partition).catch(function () {});
       })
       .catch(function (err) {
@@ -2828,9 +3075,21 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
   }
 
   /* ---------- 导入 / 导出 ---------- */
-  function doExport() {
-    var url = '/api/export?partition=' + encodeURIComponent(S.partition || '') + '&withEvents=1';
-    toast('正在打包导出…', 'gold');
+  function exportScopes() {
+    var box = $('#exportScopes');
+    if (!box) return ['items', 'tasks', 'reports', 'events', 'guardEvents'];
+    var out = [];
+    $$('input[data-scope]', box).forEach(function (el) { if (el.checked) out.push(el.dataset.scope); });
+    return out;
+  }
+
+  function doExport(ev) {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    var incl = exportScopes();
+    if (!incl.length) { toast('至少勾选一个导出范围', 'bad'); return; }
+    var url = '/api/export?partition=' + encodeURIComponent(S.partition || '') +
+      '&include=' + incl.join(',') + '&withEvents=1&withGuardEvents=1';
+    toast('正在打包导出（' + incl.join(',') + '）…', 'gold');
     fetch(url).then(function (res) {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       return res.text();
@@ -2843,7 +3102,15 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
       a.click();
       document.body.removeChild(a);
       setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
-      toast('已导出 ' + Math.round(txt.length / 1024) + ' KB');
+      var n = {};
+      try {
+        var b = JSON.parse(txt) || {};
+        ['items', 'tasks', 'reports', 'events', 'guardEvents'].forEach(function (k) {
+          if (Array.isArray(b[k])) n[k] = b[k].length;
+        });
+      } catch (e) {}
+      var bits = Object.keys(n).map(function (k) { return k + ' ' + n[k]; });
+      toast('已导出 ' + Math.round(txt.length / 1024) + ' KB' + (bits.length ? '（' + bits.join(' · ') + '）' : ''));
     }).catch(function (err) { toast('导出失败：' + err.message, 'bad'); });
   }
 
@@ -2875,6 +3142,322 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
       });
     };
     fr.readAsText(file, 'utf-8');
+  }
+
+  /* ---------- 记忆条目多选 / 批量 ---------- */
+  function selIds() {
+    var out = [];
+    for (var k in S.sel) if (S.sel[k]) out.push(k);
+    return out;
+  }
+  function pruneSel() {
+    var alive = {};
+    ((S.state && S.state.items) || []).forEach(function (it) { alive[it.id] = true; });
+    for (var k in S.goneSel) alive[k] = true;
+    for (var k in S.sel) if (!alive[k]) delete S.sel[k];
+  }
+  function renderBatchBar() {
+    pruneSel();
+    var bar = $('#batchBar');
+    if (!bar) return;
+    var ids = selIds();
+    bar.hidden = ids.length === 0;
+    var gone = ids.filter(function (id) { return S.goneSel[id]; }).length;
+    if ($('#batchCount')) $('#batchCount').textContent = String(ids.length);
+    if ($('#batchHint')) {
+      $('#batchHint').textContent = gone ? '其中 ' + gone + ' 条已删除，点「恢复」可撤销' : '';
+    }
+    var all = $('#selAll');
+    if (!all) return;
+    var list = filteredItems();
+    var on = list.filter(function (it) { return S.sel[it.id]; }).length;
+    all.checked = list.length > 0 && on === list.length;
+    all.indeterminate = on > 0 && on < list.length;
+    all.disabled = list.length === 0;
+  }
+  function setSel(id, on) {
+    if (on) S.sel[id] = true; else delete S.sel[id];
+    renderBatchBar();
+  }
+  function selectAllFiltered(on) {
+    filteredItems().forEach(function (it) {
+      if (on) S.sel[it.id] = true; else delete S.sel[it.id];
+    });
+    renderItems();
+  }
+  function batchAct(action) {
+    var ids = selIds();
+    if (!ids.length) { toast('先勾选要操作的记忆条目', 'bad'); return; }
+    var label = { pin: '钉住', unpin: '取消钉住', delete: '删除', restore: '恢复' }[action] || action;
+    var run = function () {
+      api('/api/item/batch', { method: 'POST', body: JSON.stringify({ action: action, ids: ids }) })
+        .then(function (r) {
+          var fails = (r.results || []).filter(function (x) { return !x.ok; });
+          toast('批量' + label + '：' + num(r.ok) + '/' + num(r.total) + ' 成功' +
+            (fails.length ? ' · 失败 ' + fails.length + '（' + (fails[0].error || '未知') + '）' : ''),
+            fails.length ? 'bad' : '');
+          if (action === 'delete') {
+            ids.forEach(function (id) { S.goneSel[id] = true; });
+          } else {
+            if (action === 'restore') ids.forEach(function (id) { delete S.goneSel[id]; });
+            S.sel = {};
+          }
+          renderBatchBar();
+          return load(S.partition).catch(function () {});
+        })
+        .catch(function (err) { toast('批量' + label + '失败：' + err.message, 'bad'); });
+    };
+    if (action === 'delete') {
+      confirmBox({
+        title: '批量删除 ' + ids.length + ' 条记忆？',
+        body: '软删除：条目移进回收站，可以再恢复。',
+        target: ids.slice(0, 4).join(' · ') + (ids.length > 4 ? ' … 共 ' + ids.length + ' 条' : ''),
+        safe: true, okText: '删除'
+      }).then(function (r) { if (r.ok) run(); });
+      return;
+    }
+    run();
+  }
+
+  /* ---------- Ctrl+K 全局检索浮层 ---------- */
+  function paletteOpen() { return S.pal.open; }
+  function openPalette() {
+    var w = $('#paletteWrap');
+    if (!w) return;
+    S.pal.open = true;
+    S.pal.q = ''; S.pal.idx = 0; S.pal.items = [];
+    $('#paletteQ').value = '';
+    $('#paletteList').innerHTML = '';
+    $('#paletteMeta').textContent = '分区 ' + (S.partition || '—');
+    w.hidden = false;
+    $('#paletteQ').focus();
+  }
+  function closePalette() {
+    var w = $('#paletteWrap');
+    if (w) w.hidden = true;
+    S.pal.open = false;
+    clearTimeout(S.pal.timer);
+  }
+  function paletteRun() {
+    var q = $('#paletteQ').value.trim();
+    S.pal.q = q;
+    if (!q) { S.pal.items = []; S.pal.idx = 0; renderPalette(); return; }
+    if (!S.partition) { $('#paletteMeta').textContent = '还没有可用分区'; return; }
+    var seq = ++S.pal.seq;
+    api('/api/search?partition=' + encodeURIComponent(S.partition) + '&q=' + encodeURIComponent(q) + '&limit=8')
+      .then(function (d) {
+        if (seq !== S.pal.seq) return;
+        S.pal.items = (d && d.items) || [];
+        S.pal.idx = 0;
+        renderPalette(d);
+      })
+      .catch(function (err) {
+        if (seq !== S.pal.seq) return;
+        S.pal.items = [];
+        $('#paletteList').innerHTML = '<li style="cursor:default">' + errBox('检索失败', err) + '</li>';
+        $('#paletteMeta').textContent = '';
+      });
+  }
+  function renderPalette(d) {
+    var list = $('#paletteList');
+    if (!list) return;
+    if (!S.pal.items.length) {
+      list.innerHTML = '<li style="cursor:default"><span class="muted" style="font-size:12px">' +
+        (S.pal.q ? '没有匹配的记忆' : '输入关键词开始检索（当前分区）') + '</span></li>';
+    } else {
+      list.innerHTML = S.pal.items.map(function (it, i) {
+        return '<li role="option" data-pal-idx="' + i + '"' + (i === S.pal.idx ? ' class="on" aria-selected="true"' : ' aria-selected="false"') + '>' +
+          '<span class="t">' + esc(it.title || '(无标题)') + '</span>' +
+          '<span class="mt">' + esc(KIND_LABEL[it.kind] || it.kind || '') + '</span>' +
+          '<span class="mt">' + (it.score === null || it.score === undefined ? '' : Number(it.score).toFixed(2)) + '</span>' +
+          '<span class="mt">' + pct(it.retention) + '</span>' +
+        '</li>';
+      }).join('');
+    }
+    var total = d && d.total !== undefined ? d.total : S.pal.items.length;
+    $('#paletteMeta').textContent = S.pal.q ? ('命中 ' + num(total) + ' · 显示 ' + S.pal.items.length) : '';
+  }
+  function paletteMove(delta) {
+    if (!S.pal.items.length) return;
+    var n = S.pal.items.length;
+    S.pal.idx = (S.pal.idx + delta + n) % n;
+    $$('#paletteList li').forEach(function (li, i) {
+      li.classList.toggle('on', i === S.pal.idx);
+    });
+    var cur = $('#paletteList li.on');
+    if (cur && cur.scrollIntoView) cur.scrollIntoView({ block: 'nearest' });
+  }
+  function palettePick(i) {
+    var it = S.pal.items[i === undefined ? S.pal.idx : i];
+    if (!it) return;
+    closePalette();
+    if (!itemById(it.id)) {
+      S.state = S.state || {};
+      toast('这条记忆不在当前列表里，已尝试按 id 打开', 'gold');
+    }
+    focusItem(it.id);
+  }
+
+  /* ---------- DSH 会话 ---------- */
+  function loadHarness() {
+    S.harn.busy = true;
+    renderHarness();
+    return api('/api/harness/scan').then(function (d) {
+      S.harn.data = d; S.harn.err = null; S.harn.busy = false;
+      S.harn.sel = {}; S.harn.proj = {};
+      renderHarness();
+    }).catch(function (err) {
+      S.harn.err = err; S.harn.data = null; S.harn.busy = false;
+      renderHarness();
+    });
+  }
+  function harnVisible(proj, sess) {
+    var q = String(S.harn.q || '').toLowerCase();
+    if (!q) return true;
+    return (String(proj.name || '') + ' ' + String(proj.partition || '') + ' ' + String(sess.title || '')).toLowerCase().indexOf(q) >= 0;
+  }
+  function harnSelSessions() {
+    var out = [];
+    for (var k in S.harn.sel) if (S.harn.sel[k]) out.push(k);
+    return out;
+  }
+  function harnSelProjects() {
+    var out = [];
+    for (var k in S.harn.proj) if (S.harn.proj[k]) out.push(k);
+    return out;
+  }
+  function renderHarness() {
+    var box = $('#harnessList');
+    if (!box) return;
+    var h = S.harn, d = h.data;
+    var note = $('#harnNote');
+    if (h.err) {
+      box.innerHTML = errBox('DSH 会话扫描失败', h.err, 'harness-scan');
+      if (note) note.textContent = 'GET /api/harness/scan 失败';
+      return;
+    }
+    if (!d) {
+      box.innerHTML = '<div class="empty"><b>' + (h.busy ? '扫描中…' : '尚未扫描 DSH 会话') + '</b>' +
+        (h.busy ? '' : '<span>点「扫描」读取项目与会话清单</span>') + '</div>';
+      return;
+    }
+    var totals = d.totals || {};
+    if (note) note.textContent = '项目 ' + num(totals.projects) + ' · 会话 ' + num(totals.sessions) + ' · 已导入 ' + num(totals.imported);
+    var ss = harnSelSessions(), ps = harnSelProjects();
+    if ($('#harnSel')) {
+      $('#harnSel').textContent = '已选 项目 ' + ps.length + ' / 会话 ' + ss.length +
+        ' · 根 ' + String(d.root || '—');
+    }
+    var projs = (d.projects || []).filter(function (pj) {
+      return (pj.sessions || []).some(function (s) { return harnVisible(pj, s); });
+    });
+    if (!projs.length) {
+      box.innerHTML = emptyBox('没有匹配的项目或会话', '清掉过滤词再试，或点「扫描」重新读一次');
+      return;
+    }
+    box.innerHTML = '<ul class="hlist">' + projs.map(function (pj) {
+      var sess = (pj.sessions || []).filter(function (s) { return harnVisible(pj, s); });
+      var pon = !!h.proj[pj.partition];
+      return '<li class="hproj">' +
+        '<div class="hd">' +
+          '<input type="checkbox" data-hproj="' + esc(pj.partition) + '"' + (pon ? ' checked' : '') + ' aria-label="选择整个项目">' +
+          '<span class="nm">' + esc(pj.name || pj.partition) + '</span>' +
+          '<span class="chip">' + esc(pj.partition) + '</span>' +
+          '<span class="sp"></span>' +
+          '<span class="head-note">会话 ' + num(pj.sessionCount) + ' · 已导入 ' + num(pj.importedCount) + '</span>' +
+          '<button class="btn btn-xs" data-action="harness-proj" data-project="' + esc(pj.partition) + '">导入该项目</button>' +
+        '</div>' +
+        sess.map(function (s) {
+          var dis = s.empty || s.imported;
+          return '<div class="hsess' + (s.empty ? ' empty' : '') + '">' +
+            '<input type="checkbox" data-hsess="' + esc(s.id) + '"' + (h.sel[s.id] ? ' checked' : '') +
+              (dis ? ' disabled' : '') + ' aria-label="选择会话 ' + esc(s.id) + '">' +
+            '<span class="ttl" title="' + esc(s.title || s.id) + '">' + esc(s.title || s.id) + '</span>' +
+            '<span class="mt">' + esc(rel(s.updatedAt)) + '</span>' +
+            '<span class="mt">' + num(s.turns) + ' 轮</span>' +
+            '<span class="mt">' + num(s.toolCalls) + ' 工具</span>' +
+            (s.imported ? '<span class="chip">已导入</span>' : '') +
+            (s.empty ? '<span class="chip muted">空会话</span>' : '') +
+          '</div>';
+        }).join('') +
+      '</li>';
+    }).join('') + '</ul>';
+    renderHarnessResult();
+  }
+  function renderHarnessResult() {
+    var box = $('#harnessResult');
+    if (!box) return;
+    var r = S.harn.result;
+    if (!r) { box.innerHTML = ''; return; }
+    if (r.dryRun) {
+      box.innerHTML = '<div class="hres"><b>预演（尚未写库）</b><br>' +
+        '将导入 <b>' + num(r.wouldImport) + '</b> 条 · 跳过 <b>' + num(r.skipped) + '</b> 条' +
+        '<div class="head-note" style="margin-top:6px">确认后才会带 confirmed:true 真正写入</div></div>';
+      return;
+    }
+    var parts = r.partitions || {};
+    box.innerHTML = '<div class="hres"><b>导入完成</b><br>' +
+      'imported <b>' + num(r.imported) + '</b> · skipped <b>' + num(r.skipped) + '</b>' +
+      (Array.isArray(r.reusedPartitions) && r.reusedPartitions.length ? ' · 复用分区 ' + esc(r.reusedPartitions.join(', ')) : '') +
+      '<br>涉及分区：' + (Object.keys(parts).length
+        ? Object.keys(parts).map(function (k) { return esc(k) + ' +' + num(parts[k]); }).join(' · ')
+        : '无') +
+      '</div>';
+  }
+  function harnessBody() {
+    var ss = harnSelSessions();
+    var ps = harnSelProjects();
+    if (ss.length) return { sessions: ss, _label: '会话 ' + ss.length + ' 条' };
+    if (ps.length === 1) {
+      var proj = null;
+      ((S.harn.data && S.harn.data.projects) || []).forEach(function (pj) { if (pj.partition === ps[0]) proj = pj; });
+      return { project: ps[0], _label: '项目 ' + (proj ? (proj.name || ps[0]) : ps[0]) };
+    }
+    if (ps.length > 1) {
+      var ids = [];
+      ((S.harn.data && S.harn.data.projects) || []).forEach(function (pj) {
+        if (ps.indexOf(pj.partition) < 0) return;
+        (pj.sessions || []).forEach(function (s) { if (!s.empty && !s.imported) ids.push(s.id); });
+      });
+      return { sessions: ids, _label: '项目 ' + ps.length + ' 个（展开成 ' + ids.length + ' 条会话）' };
+    }
+    return null;
+  }
+  function harnessImport(projectDirect) {
+    var body;
+    if (projectDirect) body = { project: projectDirect, _label: '项目 ' + projectDirect };
+    else body = harnessBody();
+    if (!body) { toast('先勾选项目或会话', 'bad'); return; }
+    var label = body._label || '';
+    delete body._label;
+    var post = function (payload) {
+      return api('/api/harness/import', { method: 'POST', body: JSON.stringify(payload) });
+    };
+    post(body)
+      .then(function (dry) {
+        S.harn.result = dry;
+        renderHarnessResult();
+        var would = dry && dry.wouldImport;
+        var skipped = dry && dry.skipped;
+        return confirmBox({
+          title: '确认导入 ' + label + '？',
+          body: '预演结果：将导入 ' + would + ' 条、跳过 ' + skipped + ' 条。确认后会真正写入数据库（带 confirmed:true），已存在的会话会按 content_hash 去重。',
+          target: 'POST /api/harness/import ' + JSON.stringify(body),
+          safe: true, okText: '确认导入'
+        }).then(function (r) {
+          if (!r.ok) { toast('已取消导入（只做了预演）', 'gold'); return; }
+          var payload = JSON.parse(JSON.stringify(body));
+          payload.confirmed = true;
+          return post(payload).then(function (res) {
+            S.harn.result = res;
+            renderHarnessResult();
+            S.harn.sel = {}; S.harn.proj = {};
+            toast('导入完成：imported ' + num(res.imported) + ' · skipped ' + num(res.skipped));
+            return Promise.all([loadHarness(), load(S.partition).catch(function () {})]);
+          });
+        });
+      })
+      .catch(function (err) { toast('导入失败：' + err.message, 'bad'); });
   }
 
   /* ---------- 事件绑定 ---------- */
@@ -3132,6 +3715,40 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
       focusCurveOn(id);
     });
     $('#guardForm').addEventListener('submit', runGuardCheck);
+    $('#guardLevel').addEventListener('change', function (ev) {
+      S.guardQ.level = ev.target.value; S.guardQ.offset = 0; loadGuard();
+    });
+    $('#guardSource').addEventListener('change', function (ev) {
+      S.guardQ.source = ev.target.value; S.guardQ.offset = 0; loadGuard();
+    });
+    $('#harnQ').addEventListener('input', function (ev) {
+      S.harn.q = ev.target.value.trim();
+      clearTimeout(S.harn.timer);
+      S.harn.timer = setTimeout(renderHarness, 140);
+    });
+    $('#paletteQ').addEventListener('input', function () {
+      clearTimeout(S.pal.timer);
+      S.pal.timer = setTimeout(paletteRun, 150);
+    });
+    $('#paletteWrap').addEventListener('click', function (ev) {
+      if (ev.target.id === 'paletteWrap') closePalette();
+    });
+
+    document.addEventListener('change', function (ev) {
+      var t = ev.target;
+      if (!t || t.tagName !== 'INPUT' || t.type !== 'checkbox') return;
+      if (t.id === 'selAll') { selectAllFiltered(t.checked); return; }
+      if (t.dataset && t.dataset.selItem) { setSel(t.dataset.selItem, t.checked); return; }
+      if (t.dataset && t.dataset.hsess) {
+        if (t.checked) S.harn.sel[t.dataset.hsess] = true; else delete S.harn.sel[t.dataset.hsess];
+        renderHarness();
+        return;
+      }
+      if (t.dataset && t.dataset.hproj) {
+        if (t.checked) S.harn.proj[t.dataset.hproj] = true; else delete S.harn.proj[t.dataset.hproj];
+        renderHarness();
+      }
+    });
     $('#auditRefresh').addEventListener('click', loadAudit);
     var tq = $('#toolQ');
     if (tq) {
@@ -3189,6 +3806,8 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
         if (leg.parentNode.id === 'curveLegend') renderCurve(); else renderTimeline();
         return;
       }
+      var pli = ev.target.closest('#paletteList li[data-pal-idx]');
+      if (pli) { palettePick(Number(pli.dataset.palIdx)); return; }
       var act = ev.target.closest('[data-action]');
       if (act) {
         var a = act.dataset.action;
@@ -3229,6 +3848,23 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
         else if (a === 'tool-links') loadLinks(act.dataset.id);
         else if (a === 'tool-link-add') addLink(act.dataset.id);
         else if (a === 'tool-link-del') removeLink(act.dataset.from, act.dataset.to);
+        else if (a === 'guard-view') guardSetView(act.dataset.view);
+        else if (a === 'guard-page') guardPage(Number(act.dataset.delta || 0));
+        else if (a === 'guard-del') guardDelete(act.dataset.id);
+        else if (a === 'guard-restore') guardRestore(act.dataset.id);
+        else if (a === 'guard-purge') guardPurge(act.dataset.id);
+        else if (a === 'guard-clear-sim') guardClearSimulated();
+        else if (a === 'guard-purge-all') guardPurgeAll();
+        else if (a === 'guard-list-retry') loadGuard();
+        else if (a === 'batch-pin') batchAct('pin');
+        else if (a === 'batch-unpin') batchAct('unpin');
+        else if (a === 'batch-delete') batchAct('delete');
+        else if (a === 'batch-restore') batchAct('restore');
+        else if (a === 'batch-clear') { S.sel = {}; renderItems(); }
+        else if (a === 'harness-scan') loadHarness();
+        else if (a === 'harness-import') harnessImport();
+        else if (a === 'harness-proj') harnessImport(act.dataset.project);
+        else if (a === 'harness-clear') { S.harn.sel = {}; S.harn.proj = {}; renderHarness(); }
         return;
       }
       var th = ev.target.closest('th.sortable');
@@ -3236,10 +3872,21 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
       var srow = ev.target.closest('tr.srow');
       if (srow && !ev.target.closest('button')) { focusItem(srow.dataset.id); return; }
       var row = ev.target.closest('tr.row');
-      if (row && !ev.target.closest('button')) { toggleItem(row.dataset.id); return; }
+      if (row && !ev.target.closest('button,input,a,label')) { toggleItem(row.dataset.id); return; }
     });
 
     document.addEventListener('keydown', function (ev) {
+      if ((ev.ctrlKey || ev.metaKey) && String(ev.key || '').toLowerCase() === 'k') {
+        ev.preventDefault();
+        if (paletteOpen()) closePalette(); else openPalette();
+        return;
+      }
+      if (paletteOpen()) {
+        if (ev.key === 'Escape') { ev.preventDefault(); closePalette(); return; }
+        if (ev.key === 'ArrowDown') { ev.preventDefault(); paletteMove(1); return; }
+        if (ev.key === 'ArrowUp') { ev.preventDefault(); paletteMove(-1); return; }
+        if (ev.key === 'Enter') { ev.preventDefault(); palettePick(); return; }
+      }
       if (ev.key === 'Escape') {
         if (!$('#modalWrap').hidden) { settleModal(false); return; }
         if (!$('#drawerWrap').hidden) { closeDrawer(); return; }
@@ -3265,6 +3912,7 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
     setTheme(theme, false);
     try { S.partition = localStorage.getItem('xfy-partition') || ''; } catch (e) {}
     bindEvents();
+    loadHarness().catch(function () {});
     $('#sec-items').addEventListener('scroll', tipHide, true);
     refreshAll().then(function () {
       S.timer = setInterval(function () {

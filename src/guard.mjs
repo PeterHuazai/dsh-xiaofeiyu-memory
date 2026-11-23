@@ -75,12 +75,14 @@ export function checkGuard(store, input) {
     directive = '强制：停止长时间上下文推演。先写汇报文档落盘，再只依赖主干记忆继续；新任务另开分区。';
   }
   const id = uid('g');
-  store.db.prepare('INSERT INTO guard_event (id, partition_id, task_id, ts, level, score, reasons, context_tokens, action, model_verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)')
-    .run(id, part.id, input.taskId || null, now, level, Number(score.toFixed(4)), JSON.stringify(reasons), estTokens, action);
+  const source = guardSource(input.source === undefined ? 'real' : input.source);
+  store.db.prepare('INSERT INTO guard_event (id, partition_id, task_id, ts, level, score, reasons, context_tokens, action, model_verdict, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)')
+    .run(id, part.id, input.taskId || null, now, level, Number(score.toFixed(4)), JSON.stringify(reasons), estTokens, action, source);
   store.shadow.append('guard_event', store.db.prepare('SELECT * FROM guard_event WHERE id = ?').get(id));
   return {
     id: id,
     partition: part.name,
+    source: source,
     level: level,
     score: Number(score.toFixed(4)),
     components: { context: Number(ctxPressure.toFixed(3)), hitRate: Number(hitRate.toFixed(3)), lowHit: Number(lowHit.toFixed(3)), redundancy: Number(redundancy.toFixed(3)), stale: Number(stale.toFixed(3)) },
@@ -91,6 +93,119 @@ export function checkGuard(store, input) {
     trunk: trunk,
     thresholds: { warn: Number(cfg.warnScore), block: Number(cfg.blockScore) }
   };
+}
+
+const GUARD_SOURCES = { real: 1, simulated: 1 };
+
+export function guardSource(v) {
+  const s = String(v || 'real');
+  return GUARD_SOURCES[s] ? s : 'real';
+}
+
+function guardRow(r) {
+  return {
+    id: r.id, partition_id: r.partition_id, task_id: r.task_id, ts: r.ts,
+    level: r.level, score: r.score, reasons: jsonParse(r.reasons, []),
+    context_tokens: r.context_tokens, action: r.action, model_verdict: r.model_verdict,
+    source: guardSource(r.source), deleted: !!r.deleted_at, deleted_at: r.deleted_at || null
+  };
+}
+
+export function listGuardEvents(store, input) {
+  const o = input || {};
+  const where = [];
+  const args = [];
+  if (o.partitionId) { where.push('partition_id = ?'); args.push(Number(o.partitionId)); }
+  if (o.level && o.level !== 'all') { where.push('level = ?'); args.push(String(o.level)); }
+  if (o.source && o.source !== 'all') { where.push('source = ?'); args.push(guardSource(o.source)); }
+  if (o.deleted) where.push('deleted_at IS NOT NULL');
+  else if (!o.includeDeleted) where.push('deleted_at IS NULL');
+  if (o.since) { where.push('ts >= ?'); args.push(Number(o.since)); }
+  const clause = where.length ? ' WHERE ' + where.join(' AND ') : '';
+  const limit = clamp(Number(o.limit || 40), 1, 500);
+  const offset = Math.max(0, Number(o.offset || 0));
+  const totalRow = store.db.prepare('SELECT COUNT(*) AS n FROM guard_event' + clause).get.apply(store.db.prepare('SELECT COUNT(*) AS n FROM guard_event' + clause), args);
+  const rows = store.db.prepare('SELECT * FROM guard_event' + clause + ' ORDER BY ts DESC LIMIT ? OFFSET ?').all.apply(store.db.prepare('SELECT * FROM guard_event' + clause + ' ORDER BY ts DESC LIMIT ? OFFSET ?'), args.concat([limit, offset]));
+  const tally = store.db.prepare('SELECT source, COUNT(*) AS n FROM guard_event' + clause + ' GROUP BY source').all.apply(store.db.prepare('SELECT source, COUNT(*) AS n FROM guard_event' + clause + ' GROUP BY source'), args);
+  const bySource = { simulated: 0, real: 0 };
+  for (const t of tally) bySource[guardSource(t.source)] = Number(t.n);
+  return { events: rows.map(guardRow), total: Number(totalRow.n), limit: limit, offset: offset, bySource: bySource };
+}
+
+function shadowDelete(store, id) {
+  store.shadow.append('guard_event_delete', { id: id });
+}
+
+export function deleteGuardEvents(store, input) {
+  const o = input || {};
+  const ids = [];
+  if (o.id) ids.push(String(o.id));
+  for (const x of (Array.isArray(o.ids) ? o.ids : [])) ids.push(String(x));
+  let rows = [];
+  if (ids.length) {
+    const ph = ids.map(function () { return '?'; }).join(',');
+    const stmt = store.db.prepare('SELECT * FROM guard_event WHERE id IN (' + ph + ')');
+    rows = stmt.all.apply(stmt, ids);
+  } else if (o.onlySimulated) {
+    rows = store.db.prepare("SELECT * FROM guard_event WHERE source = 'simulated' AND deleted_at IS NULL").all();
+  } else if (o.all) {
+    rows = store.db.prepare('SELECT * FROM guard_event WHERE deleted_at IS NULL').all();
+  }
+  if (!rows.length) return { deleted: 0, hard: !!o.hard, ids: [] };
+  const now = nowMs();
+  const hit = rows.map(function (r) { return r.id; });
+  if (o.hard) {
+    const ph = hit.map(function () { return '?'; }).join(',');
+    const del = store.db.prepare('DELETE FROM guard_event WHERE id IN (' + ph + ')');
+    del.run.apply(del, hit);
+    for (const id of hit) shadowDelete(store, id);
+  } else {
+    const ph = hit.map(function () { return '?'; }).join(',');
+    const upd = store.db.prepare('UPDATE guard_event SET deleted_at = ? WHERE id IN (' + ph + ')');
+    upd.run.apply(upd, [now].concat(hit));
+    for (const r of rows) {
+      const fresh = store.db.prepare('SELECT * FROM guard_event WHERE id = ?').get(r.id);
+      if (fresh) store.shadow.append('guard_event', fresh);
+    }
+  }
+  return { deleted: hit.length, hard: !!o.hard, ids: hit, simulated: rows.filter(function (r) { return guardSource(r.source) === 'simulated'; }).length };
+}
+
+export function restoreGuardEvents(store, input) {
+  const o = input || {};
+  const ids = [];
+  if (o.id) ids.push(String(o.id));
+  for (const x of (Array.isArray(o.ids) ? o.ids : [])) ids.push(String(x));
+  if (!ids.length) return { restored: 0, ids: [] };
+  const ph = ids.map(function () { return '?'; }).join(',');
+  const stmt = store.db.prepare('SELECT id FROM guard_event WHERE id IN (' + ph + ') AND deleted_at IS NOT NULL');
+  const rows = stmt.all.apply(stmt, ids);
+  const hit = rows.map(function (r) { return r.id; });
+  if (hit.length) {
+    const ph2 = hit.map(function () { return '?'; }).join(',');
+    const upd = store.db.prepare('UPDATE guard_event SET deleted_at = NULL WHERE id IN (' + ph2 + ')');
+    upd.run.apply(upd, hit);
+    for (const id of hit) {
+      const fresh = store.db.prepare('SELECT * FROM guard_event WHERE id = ?').get(id);
+      if (fresh) store.shadow.append('guard_event', fresh);
+    }
+  }
+  return { restored: hit.length, ids: hit };
+}
+
+export function purgeGuardEvents(store, input) {
+  const o = input || {};
+  const days = Number(o.olderThanDays === undefined ? 30 : o.olderThanDays);
+  const cutoff = nowMs() - Math.max(0, days) * 86400000;
+  const rows = store.db.prepare('SELECT id FROM guard_event WHERE deleted_at IS NOT NULL AND deleted_at <= ?').all(cutoff);
+  const hit = rows.map(function (r) { return r.id; });
+  if (hit.length) {
+    const ph = hit.map(function () { return '?'; }).join(',');
+    const del = store.db.prepare('DELETE FROM guard_event WHERE id IN (' + ph + ')');
+    del.run.apply(del, hit);
+    for (const id of hit) shadowDelete(store, id);
+  }
+  return { purged: hit.length, olderThanDays: days, cutoff: cutoff };
 }
 
 export async function modelSelfCheck(store, result) {

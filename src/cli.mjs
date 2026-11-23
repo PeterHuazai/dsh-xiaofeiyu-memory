@@ -4,10 +4,11 @@ import path from 'node:path';
 import { openStore, backup, rebuildFromShadow, integrity, listBackups, DEFAULT_CONFIG, deepMerge } from './db.mjs';
 import * as engine from './engine.mjs';
 import * as tasks from './tasks.mjs';
-import { checkGuard, audit } from './guard.mjs';
+import { checkGuard, audit, listGuardEvents, deleteGuardEvents, restoreGuardEvents, purgeGuardEvents } from './guard.mjs';
 import * as vision from './vision.mjs';
 import * as vector from './vector.mjs';
 import * as tools from './tools.mjs';
+import * as harness from './harness.mjs';
 
 const argv = process.argv.slice(2);
 
@@ -236,8 +237,83 @@ async function main() {
     return out(r, '批量描述：处理 ' + r.processed + ' · 成功 ' + r.done + ' · 失败 ' + r.failed + ' · 剩余 ' + r.remaining + (r.failed ? '（失败项重跑即重试）' : ''));
   }
   if (cmd === 'guard') {
-    const r = checkGuard(store, { partition: need('partition'), contextTokens: flags.tokens, chars: flags.chars, taskId: flags.task });
-    return out(r, '守卫生效等级：' + r.level + ' (score ' + r.score + ')\n' + r.reasons.join('\n') + '\n→ ' + r.directive);
+    if (sub === 'list') {
+      const r = listGuardEvents(store, {
+        partitionId: flags.partition ? engine.partitionByName(store, flags.partition).id : null,
+        level: flags.level || 'all',
+        source: flags.source || 'all',
+        deleted: flags.deleted === true || flags.deleted === '1',
+        includeDeleted: flags['include-deleted'] === true || flags['include-deleted'] === '1',
+        limit: Number(flags.limit || 40),
+        offset: Number(flags.offset || 0)
+      });
+      if (asJson) return out(r);
+      const head = '守卫记录 ' + r.total + ' 条（模拟 ' + r.bySource.simulated + ' / 真实 ' + r.bySource.real + '），本页 ' + r.events.length + ' 条';
+      return out(r, head + '\n' + r.events.map(function (e) {
+        return e.id + '  ' + new Date(e.ts).toISOString().slice(0, 16).replace('T', ' ') + '  ' + e.level + '  ' + e.source + (e.deleted ? '  [已删]' : '') + '  ' + String((e.reasons || []).join(' / ')).slice(0, 80);
+      }).join('\n'));
+    }
+    if (sub === 'delete') {
+      const ids = flags.ids ? String(flags.ids).split(',').filter(Boolean) : null;
+      const r = deleteGuardEvents(store, { id: flags.id || rest[2], ids: ids, onlySimulated: !!flags.simulated, all: !!flags.all, hard: !!flags.hard });
+      return out(r, '已删除 ' + r.deleted + ' 条守卫记录（其中模拟记录 ' + r.simulated + '）' + (r.hard ? '，彻底删除不可恢复' : '，已进回收（mem guard restore 可恢复）'));
+    }
+    if (sub === 'clear') {
+      const r = deleteGuardEvents(store, { onlySimulated: true, hard: !!flags.hard });
+      return out(r, '已清空 ' + r.deleted + ' 条模拟检查记录' + (r.hard ? '（彻底删除）' : '（可 mem guard restore 恢复）'));
+    }
+    if (sub === 'restore') {
+      const ids = flags.ids ? String(flags.ids).split(',').filter(Boolean) : null;
+      const r = restoreGuardEvents(store, { id: flags.id || rest[2], ids: ids });
+      return out(r, '已恢复 ' + r.restored + ' 条守卫记录');
+    }
+    if (sub === 'purge') {
+      const r = purgeGuardEvents(store, { olderThanDays: flags.days === undefined ? flags.olderThanDays : flags.days });
+      return out(r, '已彻底清理 ' + r.purged + ' 条超过 ' + r.olderThanDays + ' 天的守卫记录');
+    }
+    if (sub && sub !== 'check') throw new Error('unknown guard subcommand: ' + sub);
+    const r = checkGuard(store, { partition: need('partition'), contextTokens: flags.tokens, chars: flags.chars, taskId: flags.task, source: flags.simulated ? 'simulated' : 'real' });
+    return out(r, '守卫生效等级：' + r.level + ' (score ' + r.score + ') · ' + r.source + '\n' + r.reasons.join('\n') + '\n→ ' + r.directive);
+  }
+  if (cmd === 'harness') {
+    if (sub === 'import') {
+      const sessions = flags.sessions ? String(flags.sessions).split(',').filter(Boolean) : null;
+      const r = harness.importHarness(store, { root: flags.root, sessions: sessions, project: flags.project, confirmed: !!flags.confirm || !!flags.yes, force: !!flags.force });
+      if (asJson) return out(r);
+      if (r.dryRun) return out(r, '预演：将导入 ' + r.wouldImport + ' 条会话，跳过 ' + r.skipped + ' 条。加 --confirm 才真正写入。');
+      return out(r, '已导入 ' + r.imported + ' 条会话记忆，跳过 ' + r.skipped + ' 条，涉及分区：' + (r.reusedPartitions.join(', ') || '无'));
+    }
+    const scan = harness.scanHarness(store, { root: flags.root });
+    if (asJson) return out(scan);
+    const lines = ['DSH 会话根：' + scan.root + '（存在 ' + scan.exists + '）',
+      '共 ' + scan.totals.projects + ' 个项目 / ' + scan.totals.sessions + ' 个会话，已导入 ' + scan.totals.imported + ' 个'];
+    for (const p of scan.projects) {
+      lines.push('');
+      lines.push('[' + p.partition + '] ' + p.name + ' · ' + p.sessionCount + ' 个会话（已导入 ' + p.importedCount + '）· ' + p.cwd);
+      for (const s of p.sessions) {
+        if (s.empty) continue;
+        lines.push('  ' + (s.imported ? '✓' : '·') + ' ' + s.id + '  ' + new Date(s.updatedAt).toISOString().slice(0, 10) + '  ' + String(s.title).slice(0, 40) + '  (' + s.turns + ' 轮 / ' + s.toolCalls + ' 工具)');
+      }
+    }
+    lines.push('', '导入：mem harness import --project <分区> --confirm   或   --sessions <id,id> --confirm');
+    return out(scan, lines.join('\n'));
+  }
+  if (cmd === 'item') {
+    const ids = flags.ids ? String(flags.ids).split(',').filter(Boolean) : (flags.id ? [String(flags.id)] : []);
+    if (!ids.length) throw new Error('需要 --ids a,b 或 --id');
+    const action = sub || 'pin';
+    const results = [];
+    for (const id of ids) {
+      try {
+        if (action === 'pin' || action === 'unpin') tools.setPinned(store, { id: id, pinned: action === 'pin' });
+        else if (action === 'delete') engine.deleteItem(store, { id: id, reason: flags.reason || 'batch' });
+        else if (action === 'restore') engine.restoreItem(store, id);
+        else throw new Error('unknown item action: ' + action + '（pin|unpin|delete|restore）');
+        results.push({ id: id, ok: true });
+      } catch (err) { results.push({ id: id, ok: false, error: String(err.message || err) }); }
+    }
+    const ok = results.filter(function (x) { return x.ok; }).length;
+    return out({ action: action, results: results }, action + '：成功 ' + ok + ' / ' + results.length + (ok < results.length ? '\n' + results.filter(function (x) { return !x.ok; }).map(function (x) { return x.id + ' → ' + x.error; }).join('\n') : ''));
   }
   if (cmd === 'audit') {
     const r = audit(store, { partition: flags.partition || null, hours: flags.hours });
@@ -263,7 +339,8 @@ async function main() {
     return out(store.config);
   }
   if (cmd === 'export') {
-    const bundle = tasks.exportBundle(store, { partition: flags.partition || null, withEvents: flags.events !== '0', withConfig: !!flags.config });
+    const include = flags.include ? String(flags.include).split(',').map(function (s) { return s.trim(); }).filter(Boolean) : null;
+    const bundle = tasks.exportBundle(store, { partition: flags.partition || null, withEvents: flags.events !== '0', withGuardEvents: flags.guard === true || flags.guard === '1', withConfig: !!flags.config, include: include });
     if (flags.out) { fs.writeFileSync(String(flags.out), JSON.stringify(bundle, null, 2)); return out({ file: flags.out, items: bundle.items.length }); }
     return out(bundle);
   }

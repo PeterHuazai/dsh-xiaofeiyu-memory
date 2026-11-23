@@ -4,7 +4,8 @@ import path from 'node:path';
 import { openStore, backup, integrity, listBackups } from './db.mjs';
 import * as engine from './engine.mjs';
 import * as tasks from './tasks.mjs';
-import { checkGuard, modelSelfCheck, audit } from './guard.mjs';
+import { checkGuard, modelSelfCheck, audit, listGuardEvents, deleteGuardEvents, restoreGuardEvents, purgeGuardEvents } from './guard.mjs';
+import * as harness from './harness.mjs';
 import * as vision from './vision.mjs';
 import * as vector from './vector.mjs';
 import * as tools from './tools.mjs';
@@ -31,6 +32,25 @@ function argOf(name, fallback) {
   const i = argv.indexOf('--' + name);
   if (i >= 0 && argv[i + 1]) return argv[i + 1];
   return fallback;
+}
+
+function batchItems(store, body) {
+  const action = String((body && body.action) || 'pin');
+  const ids = Array.isArray(body && body.ids) ? body.ids.map(String) : [];
+  if (!ids.length) throw new Error('ids required');
+  const done = [];
+  for (const id of ids) {
+    try {
+      if (action === 'pin' || action === 'unpin') tools.setPinned(store, { id: id, pinned: action === 'pin' });
+      else if (action === 'delete') engine.deleteItem(store, { id: id, reason: body.reason || 'batch' });
+      else if (action === 'restore') engine.restoreItem(store, id);
+      else throw new Error('unknown action: ' + action);
+      done.push({ id: id, ok: true });
+    } catch (err) {
+      done.push({ id: id, ok: false, error: String(err.message || err) });
+    }
+  }
+  return { action: action, total: ids.length, ok: done.filter(function (d) { return d.ok; }).length, results: done };
 }
 
 function send(res, code, body, type) {
@@ -83,8 +103,8 @@ function stateBundle(partition) {
   const items = tid ? engine.itemList(store, tid, { limit: 400 }) : [];
   const events = store.db.prepare('SELECT id, partition_id, task_id, query, ts, returned, used, top_score, items, redundant FROM recall_event ' + (tid ? 'WHERE partition_id = ? ' : '') + 'ORDER BY ts DESC LIMIT 60')
     .all.apply(store.db.prepare('SELECT id, partition_id, task_id, query, ts, returned, used, top_score, items, redundant FROM recall_event ' + (tid ? 'WHERE partition_id = ? ' : '') + 'ORDER BY ts DESC LIMIT 60'), tid ? [tid] : []);
-  const guards = store.db.prepare('SELECT * FROM guard_event ' + (tid ? 'WHERE partition_id = ? ' : '') + 'ORDER BY ts DESC LIMIT 40')
-    .all.apply(store.db.prepare('SELECT * FROM guard_event ' + (tid ? 'WHERE partition_id = ? ' : '') + 'ORDER BY ts DESC LIMIT 40'), tid ? [tid] : []);
+  const guards = store.db.prepare("SELECT * FROM guard_event WHERE deleted_at IS NULL " + (tid ? 'AND partition_id = ? ' : '') + 'ORDER BY ts DESC LIMIT 40')
+    .all.apply(store.db.prepare("SELECT * FROM guard_event WHERE deleted_at IS NULL " + (tid ? 'AND partition_id = ? ' : '') + 'ORDER BY ts DESC LIMIT 40'), tid ? [tid] : []);
   return {
     overview: overview,
     activePartition: target,
@@ -133,12 +153,23 @@ const routes = {
     return { events: stmt.all.apply(stmt, pid ? [pid, limit] : [limit]) };
   },
   'GET /api/guard/events': function (ctx) {
-    const pid = partIdOf(q(ctx.url, 'partition', ''));
-    const limit = Number(q(ctx.url, 'limit', 100));
-    const sql = 'SELECT * FROM guard_event ' + (pid ? 'WHERE partition_id = ? ' : '') + 'ORDER BY ts DESC LIMIT ?';
-    const stmt = store.db.prepare(sql);
-    return { events: stmt.all.apply(stmt, pid ? [pid, limit] : [limit]) };
+    return listGuardEvents(store, {
+      partitionId: partIdOf(q(ctx.url, 'partition', '')),
+      level: q(ctx.url, 'level', 'all'),
+      source: q(ctx.url, 'source', 'all'),
+      deleted: q(ctx.url, 'deleted', '') === '1',
+      includeDeleted: q(ctx.url, 'includeDeleted', '') === '1',
+      limit: Number(q(ctx.url, 'limit', 40)),
+      offset: Number(q(ctx.url, 'offset', 0))
+    });
   },
+  'POST /api/guard/delete': function (ctx) {
+    return deleteGuardEvents(store, { id: ctx.body.id, ids: ctx.body.ids, onlySimulated: !!ctx.body.onlySimulated, all: !!ctx.body.all, hard: !!ctx.body.hard });
+  },
+  'POST /api/guard/restore': function (ctx) { return restoreGuardEvents(store, { id: ctx.body.id, ids: ctx.body.ids }); },
+  'POST /api/guard/purge': function (ctx) { return purgeGuardEvents(store, { olderThanDays: ctx.body.olderThanDays }); },
+  'GET /api/harness/scan': function (ctx) { return harness.scanHarness(store, { root: q(ctx.url, 'root', '') || null }); },
+  'POST /api/harness/import': function (ctx) { return harness.importHarness(store, ctx.body); },
   'GET /api/audit': function (ctx) { return audit(store, { partition: q(ctx.url, 'partition', '') || null, hours: Number(q(ctx.url, 'hours', 168)) }); },
   'GET /api/recycle': function (ctx) { return { items: engine.listRecycle(store, partIdOf(q(ctx.url, 'partition', ''))) }; },
   'GET /api/reports': function (ctx) {
@@ -164,7 +195,8 @@ const routes = {
     return { __raw: true, buf: buf, mime: row.mime };
   },
   'GET /api/export': function (ctx) {
-    return tasks.exportBundle(store, { partition: q(ctx.url, 'partition', '') || null, withEvents: q(ctx.url, 'withEvents', '1') === '1', withConfig: q(ctx.url, 'withConfig', '0') === '1' });
+    const include = String(q(ctx.url, 'include', '') || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    return tasks.exportBundle(store, { partition: q(ctx.url, 'partition', '') || null, withEvents: q(ctx.url, 'withEvents', '1') === '1', withGuardEvents: q(ctx.url, 'withGuardEvents', '0') === '1', withConfig: q(ctx.url, 'withConfig', '0') === '1', include: include.length ? include : null });
   },
   'POST /api/partitions': function (ctx) { return engine.ensurePartition(store, ctx.body); },
   'POST /api/remember': function (ctx) { return engine.remember(store, ctx.body); },
@@ -204,7 +236,9 @@ const routes = {
   'POST /api/attach/delete': function (ctx) { return engine.deleteAttachment(store, ctx.body.id, !!ctx.body.hard); },
   'POST /api/sweep': function () { return engine.sweep(store); },
   'POST /api/backup': function () { return backup(store); },
-  'POST /api/guard/check': function (ctx) { return checkGuard(store, ctx.body); },
+  'POST /api/guard/check': function (ctx) { return checkGuard(store, Object.assign({}, ctx.body, { source: ctx.body.source || 'real' })); },
+  'POST /api/item/pin': function (ctx) { return tools.setPinned(store, { id: ctx.body.id, pinned: !!ctx.body.pinned }); },
+  'POST /api/item/batch': function (ctx) { return batchItems(store, ctx.body); },
   'POST /api/guard/model-check': async function (ctx) {
     const row = store.db.prepare('SELECT * FROM guard_event WHERE id = ?').get(String(ctx.body.id || ''));
     if (!row) throw new Error('unknown guard event');

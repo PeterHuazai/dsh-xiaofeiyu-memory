@@ -65,6 +65,8 @@ mem audit --partition xiaofeiyu
 
 每次检查都会落 `guard_event`，看板里能看到历史。「模型自检」默认关闭（需 endpoint + 环境变量 key），关着时纯本地启发式，不联网。
 
+每条记录带 `source`：`real` 是干活时真跑的检查，`simulated` 是看板「模拟检查」跑出来的演练记录。两类混在一起会污染命中率统计，所以可以单独清掉模拟记录（见第 16 节）。
+
 `mem audit` 的 findings 覆盖：过期条目（STALE_ITEMS）、分区膨胀、命中率过低、重复读取偏高、没有主干、任务长期未关、备份过期、附件缺描述（CAPTION_MISSING）。
 
 ## 6. 多重保险
@@ -132,6 +134,15 @@ mem import --file bundle.json [--rename newname]
 
 导入按内容 hash 去重，汇报会重新落盘成新文件，分区可用 `--rename` 改名。
 
+导出默认全量；只要一部分时用 `--include`（逗号清单，可选项 `items,tasks,reports,events,guardEvents`）：
+
+```bash
+mem export --partition xiaofeiyu --include items,reports --out brief.json
+mem export --partition xiaofeiyu --guard 1 --out with-guard.json   # 连守卫记录一起带走
+```
+
+看板的导出面板是同一回事：勾选哪几类就只导哪几类。
+
 ## 11. 参数微调
 
 `mem config get` 看全部，`mem config set <key> <value>` 改（按合理区间夹紧），或直接在网页的参数面板改。常用项：
@@ -173,6 +184,7 @@ src/guard.mjs    守卫与审查
 src/vector.mjs   向量、语义指纹、后端探测
 src/vec-index.mjs sqlite-vec ANN 扩展接线
 src/vision.mjs   多模态描述（单张 + 批量）
+src/harness.mjs  DSH 历史会话扫描与导入（多帧 zstd）
 src/server.mjs   HTTP API + 静态托管
 src/cli.mjs      命令行
 web/index.html   看板（单文件、离线）
@@ -232,3 +244,48 @@ mem summarize --partition xiaofeiyu --limit 12 --title "向量层主干"
 **什么时候用哪个**：想不起原文 → `search`；要写汇报/复盘 → `digest`；怀疑召回不准 → `explain`；
 结论太多太散 → `summarize`；库里是不是坏了 → `health`；重复写了好几遍 → `dedupe`；
 结论和依据要串起来 → `link`/`expand`；某条绝对不能丢 → `pin`。
+
+## 16. 守卫记录：删除 / 恢复 / 清空模拟记录
+
+守卫记录是审计流水，删错了要能回来，所以默认**软删除**（进回收站，可恢复），要彻底消失得显式 `--hard`。
+
+```bash
+mem guard list --partition xiaofeiyu --limit 20          # 默认只看未删除
+mem guard list --source simulated                        # 只看模拟检查
+mem guard list --deleted                                 # 只看回收站
+mem guard delete <id>                                    # 软删一条（进回收站）
+mem guard delete --ids a,b,c
+mem guard clear                                          # 一键清空所有模拟记录（软删）
+mem guard clear --hard                                   # 彻底清掉模拟记录
+mem guard restore <id>                                   # 从回收站恢复
+mem guard purge --days 30                                # 清掉 30 天前已软删的记录（默认 30 天）
+```
+
+看板「守卫」面板有同一套入口：来源/等级筛选、分页、行内「删除」、顶部「清空模拟记录」、右上「回收站」视图（恢复 / 彻底清理，均二次确认）。
+
+## 17. 导入 DSH 历史会话（一项目一分区）
+
+别的分区、别的项目里聊过的东西也能进记忆库：扫的是 DSH 自己的会话存档（`~/.dsh/sessions`），**先出清单，你确认了才写库**。
+
+```bash
+mem harness scan                 # 按项目分组列出会话（标题、时间、轮次、首条需求），✓ = 已导入
+mem harness import --project xiaofeiyu --confirm     # 导入某个项目的全部未导入会话
+mem harness import --sessions s-abc,s-def --confirm  # 只导指定几条
+```
+
+规则：
+
+- **一个项目一个分区**，分区名 = 项目目录末段（同名分区直接复用，不新建）；分区 description 记 `harness:<cwd>` 做归属标记，同名不同路径会自动加 `-<hash6>` 后缀。
+- 每条会话写成一条 `kind='note'` 的摘要记忆（会话 id、项目、时间、轮次、标题、首条需求、最后结论，原文进 body 截断），按内容 hash 去重，重复导入会 skip。
+- 空会话（没有 user 也没有 assistant）默认跳过；`--force` 才会连已导入的也重写。
+- 不带 `--confirm` 只预演：返回 `{dryRun:true, wouldImport, skipped, plan}`，一行都不写。
+
+看板第 14 个板块「DSH 会话」就是它的图形界面：勾选项目/会话 → 预演 → 确认导入。
+
+## 18. 批量操作与 Ctrl+K
+
+```bash
+mem item pin --ids a,b,c        # 也支持 unpin / delete / restore
+```
+
+看板里：条目表左侧有复选框（表头全选），选中后出现批量条（钉住 / 取消钉住 / 删除 / 恢复）；任意位置按 **Ctrl+K** 打开全局检索浮层，输入即搜当前分区，↑↓ 选、Enter 打开详情、Esc 关闭。

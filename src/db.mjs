@@ -145,7 +145,9 @@ const SCHEMA = [
   "  reasons TEXT NOT NULL DEFAULT '[]',",
   "  context_tokens INTEGER NOT NULL DEFAULT 0,",
   "  action TEXT NOT NULL DEFAULT '',",
-  "  model_verdict TEXT",
+  "  model_verdict TEXT,",
+  "  source TEXT NOT NULL DEFAULT 'real',",
+  "  deleted_at INTEGER",
   ");",
   "CREATE INDEX IF NOT EXISTS guard_ts ON guard_event(ts);",
   "CREATE TABLE IF NOT EXISTS item_vector (",
@@ -293,11 +295,14 @@ export function migrate(db) {
   const rcols = columns(db, 'report');
   if (rcols.length && rcols.indexOf('deleted_at') < 0) { try { db.exec('ALTER TABLE report ADD COLUMN deleted_at INTEGER'); } catch (err) {} }
   if (rcols.length && rcols.indexOf('trash_path') < 0) { try { db.exec('ALTER TABLE report ADD COLUMN trash_path TEXT'); } catch (err) {} }
+  const gcols = columns(db, 'guard_event');
+  if (gcols.length && gcols.indexOf('source') < 0) { try { db.exec("ALTER TABLE guard_event ADD COLUMN source TEXT NOT NULL DEFAULT 'real'"); } catch (err) {} }
+  if (gcols.length && gcols.indexOf('deleted_at') < 0) { try { db.exec('ALTER TABLE guard_event ADD COLUMN deleted_at INTEGER'); } catch (err) {} }
 }
 
 export function openStore(opts) {
   const o = opts || {};
-  const root = o.root || ROOT;
+  const root = o.root || process.env.MEMORY_ROOT || ROOT;
   const p = dataPaths(root);
   mkdirp(p.dataDir); mkdirp(p.shadowDir); mkdirp(p.backupDir); mkdirp(p.reportsDir); mkdirp(path.join(p.dataDir, 'attachments'));
   // allowExtension 只在创建时能打开：sqlite-vec 必须它才能 loadExtension，老 Node 不支持就退回普通打开
@@ -372,7 +377,7 @@ const REPLAYABLE = {
   recall_event: 'INSERT OR REPLACE INTO recall_event (id, partition_id, task_id, session_id, query, ts, returned, used, top_score, items, redundant, latency_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   task: 'INSERT OR REPLACE INTO task (id, partition_id, title, status, started_at, ended_at, context_tokens, report_path, summary, log) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   report: 'INSERT OR REPLACE INTO report (id, task_id, partition_id, title, path, summary, tokens, created_at, deleted_at, trash_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-  guard_event: 'INSERT OR REPLACE INTO guard_event (id, partition_id, task_id, ts, level, score, reasons, context_tokens, action, model_verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+  guard_event: "INSERT OR REPLACE INTO guard_event (id, partition_id, task_id, ts, level, score, reasons, context_tokens, action, model_verdict, source, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'real'), ?)",
   attachment: 'INSERT OR REPLACE INTO attachment (id, item_id, partition_id, path, mime, bytes, sha256, caption, width, height, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   item_link: 'INSERT OR REPLACE INTO item_link (id, partition_id, from_id, to_id, relation, created_at) VALUES (?, ?, ?, ?, ?, ?)'
 };
@@ -383,7 +388,7 @@ export const REPLAY_COLUMNS = {
   recall_event: ['id', 'partition_id', 'task_id', 'session_id', 'query', 'ts', 'returned', 'used', 'top_score', 'items', 'redundant', 'latency_ms'],
   task: ['id', 'partition_id', 'title', 'status', 'started_at', 'ended_at', 'context_tokens', 'report_path', 'summary', 'log'],
   report: ['id', 'task_id', 'partition_id', 'title', 'path', 'summary', 'tokens', 'created_at', 'deleted_at', 'trash_path'],
-  guard_event: ['id', 'partition_id', 'task_id', 'ts', 'level', 'score', 'reasons', 'context_tokens', 'action', 'model_verdict'],
+  guard_event: ['id', 'partition_id', 'task_id', 'ts', 'level', 'score', 'reasons', 'context_tokens', 'action', 'model_verdict', 'source', 'deleted_at'],
   attachment: ['id', 'item_id', 'partition_id', 'path', 'mime', 'bytes', 'sha256', 'caption', 'width', 'height', 'created_at'],
   item_link: ['id', 'partition_id', 'from_id', 'to_id', 'relation', 'created_at']
 };
@@ -400,6 +405,11 @@ export function rebuildFromShadow(root, shadowDir) {
   let applied = 0;
   try {
     for (const e of entries) {
+      if (e.op === 'guard_event_delete') {
+        const gid = (e.row || {}).id;
+        if (gid) { try { cache.prepare('DELETE FROM guard_event WHERE id = ?').run(String(gid)); applied += 1; } catch (err) { /* skip */ } }
+        continue;
+      }
       const sql = REPLAYABLE[e.op];
       if (!sql) continue;
       const cols = REPLAY_COLUMNS[e.op];

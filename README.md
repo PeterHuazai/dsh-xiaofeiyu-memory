@@ -5,7 +5,7 @@
 这是一个 **DeepSeek Harness（DSH）插件**，也是一套可以独立运行的本地记忆库：
 多轮长对话里最容易出问题的两件事 ——「记住不该混的」和「忘掉不该记的」—— 它都做了工程化处理。
 
-> 作者说明：这是**非人工智能专业的学生**拿 DeepSeek Harness 写着玩的插件。功能是真的能跑（108 个自动化测试全绿），
+> 作者说明：这是**非人工智能专业的学生**拿 DeepSeek Harness 写着玩的插件。功能是真的能跑（129 个自动化测试全绿），
 > 但设计上一定还有不少幼稚和可以改进的地方，欢迎大家指正和评价，不喜也勿喷 🙏
 
 ---
@@ -107,14 +107,15 @@ cordis.patch.yml    插件挂载点
 src/db.mjs          SQLite schema + 影子日志 + 备份 + 配置
 src/engine.mjs      分词、遗忘曲线、remember/recall/feedback、休眠清理、附件
 src/vector.mjs      本地哈希向量 + 语义指纹 + 三后端探测 + ANN
-src/guard.mjs       守卫打分与审查
+src/guard.mjs       守卫打分与审查（含记录软删/恢复/清空）
+src/harness.mjs     DSH 历史会话扫描与导入（多帧 zstd、一项目一分区）
 src/tasks.mjs       任务闸门、汇报写删恢复、导入导出、参数夹紧
 src/vision.mjs      多模态描述（可选视觉模型）
 src/tools.mjs       search/digest/explain/link/expand/pin/health/dedupe/summarize
 src/server.mjs      HTTP API + 静态看板
 src/cli.mjs         命令行
 web/index.html      看板（单文件内联）
-tests/run-tests.mjs 108 个断言
+tests/run-tests.mjs 129 个断言
 ```
 
 ## 参数（都能在看板里改，`updateConfig` 会按合理区间夹紧）
@@ -142,7 +143,7 @@ tests/run-tests.mjs 108 个断言
 ## 测试
 
 ```bash
-node tests/run-tests.mjs    # 通过 108 / 失败 0
+node tests/run-tests.mjs    # 通过 129 / 失败 0
 node tests/plugin-smoke.mjs # 插件形态冒烟：13 个工具真实注册并逐个调用（11 项全 PASS）
 ```
 

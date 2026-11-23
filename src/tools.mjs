@@ -117,7 +117,7 @@ export function digest(store, input) {
   const hits = one('SELECT COUNT(*) FROM recall_event WHERE partition_id = ? AND ts >= ? AND used = 1', [part.id, since]);
   const hitRate = judged ? Number((hits / judged).toFixed(4)) : null;
   const guards = {};
-  for (const g of db.prepare('SELECT level, COUNT(*) AS n FROM guard_event WHERE partition_id = ? AND ts >= ? GROUP BY level').all(part.id, since)) guards[g.level] = g.n;
+  for (const g of db.prepare('SELECT level, COUNT(*) AS n FROM guard_event WHERE partition_id = ? AND ts >= ? AND deleted_at IS NULL GROUP BY level').all(part.id, since)) guards[g.level] = g.n;
   const states = {};
   for (const s of db.prepare('SELECT state, COUNT(*) AS n FROM item WHERE partition_id = ? AND deleted_at IS NULL GROUP BY state').all(part.id)) states[s.state] = s.n;
   const daily = [];

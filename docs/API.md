@@ -16,14 +16,15 @@ Base: http://127.0.0.1:8787   全部返回 JSON（除静态文件与附件二进
 | GET | /api/curve?id=&days= | {item, stability, points:[{day,retention}]} |
 | GET | /api/timeline?partition=&days=30 | {points:[{day,ts,recalls,hits}]} |
 | GET | /api/events?partition=&limit= | {events:[recall_event]} |
-| GET | /api/guard/events?partition=&limit= | {events:[guard_event]} |
+| GET | /api/guard/events?partition=&level=&source=&deleted=1&includeDeleted=1&limit=40&offset=0 | {events:[guard_event], total, limit, offset, bySource:{simulated,real}}；默认只列未删除；`deleted=1` 只看回收站 |
 | GET | /api/audit?partition=&hours= | {generatedAt, findings:[{severity,partition,code,message,suggestion}], severity} |
 | GET | /api/recycle?partition= | {items:[item + expiresAt/expired]} |
 | GET | /api/reports?partition=&trash=1 | {reports:[...]}；`trash=1` 只返回回收站里的汇报（带 inTrash/expiresAt/expired） |
 | GET | /api/caption/status?partition= | {vision:{enabled,ready,hint,model,apiKeyEnv,apiKeyPresent}, total, captioned, missing, pending[]} |
 | GET | /api/report?path= | {path, markdown} (仅允许 data/reports 下文件) |
 | GET | /api/attachment?id= | 原始图片字节 |
-| GET | /api/export?partition=&withEvents=1&withConfig=0 | bundle JSON |
+| GET | /api/export?partition=&withEvents=1&withGuardEvents=0&withConfig=0&include=items,tasks,reports,events,guardEvents | bundle JSON（`include` 逗号清单控制范围，空数组表示未导出） |
+| GET | /api/harness/scan?root= | {root, exists, projects:[{dir,cwd,name,partition,sessionCount,importedCount,sessions[{id,title,createdAt,updatedAt,firstUser,lastAssistant,turns,toolCalls,bytes,empty,imported,file}]}], totals:{projects,sessions,imported}} |
 | GET | /api/vector/status | {enabled,dims,model,items,covered,vectorWeight,vectorFloor,fpWeight,backend:{configured,sqliteVecAvailable,effective,extensionPath,extensionVersion,indexDims,indexed,error},provider{...},deepseek{enabled,model,apiKeyPresent,ready}} |
 
 ### state 结构（看板主数据源）
@@ -41,7 +42,7 @@ content_hash, source, task_id, superseded_by, deleted_at, delete_reason, retenti
 id, partition_id, task_id, session_id, query, ts, returned, used(null|0|1), top_score, items(JSON 字符串), redundant, latency_ms
 
 ### guard_event
-id, partition_id, task_id, ts, level(info|ok|warn|block), score, reasons(JSON 字符串数组), context_tokens, action, model_verdict
+id, partition_id, task_id, ts, level(info|ok|warn|block), score, reasons(JSON 字符串数组), context_tokens, action, model_verdict, source(real|simulated), deleted_at(空=未删)
 
 ## 写
 
@@ -68,6 +69,12 @@ id, partition_id, task_id, ts, level(info|ok|warn|block), score, reasons(JSON �
 | POST | /api/backup | {} |
 | POST | /api/guard/check | {partition, contextTokens|chars, taskId} → 见下 |
 | POST | /api/guard/model-check | {id} |
+| POST | /api/guard/delete | {id} \| {ids:[]} \| {onlySimulated:true} \| {all:true}，可加 {hard:true} → {deleted,hard,ids,simulated}（默认软删，可 restore） |
+| POST | /api/guard/restore | {id} \| {ids:[]} → {restored,ids} |
+| POST | /api/guard/purge | {olderThanDays:30} → {purged,olderThanDays,cutoff} |
+| POST | /api/harness/import | {project} \| {sessions:[id..]}，`confirmed:true` 才写库；不带时只返回 {dryRun:true, wouldImport, skipped, plan} |
+| POST | /api/item/pin | {id, pinned} → item |
+| POST | /api/item/batch | {action:'pin'\|'unpin'\|'delete'\|'restore', ids:[]} → {action,total,ok,results:[{id,ok,error?}]} |
 | POST | /api/task/start | {partition, title, goal, contextTokens} |
 | POST | /api/task/log | {taskId, note, tokens} |
 | POST | /api/task/end | {taskId, summary, markdown, partition} |
@@ -77,7 +84,7 @@ id, partition_id, task_id, ts, level(info|ok|warn|block), score, reasons(JSON �
 
 ### guard/check 返回
 ```
-{ id, partition, level:'ok'|'warn'|'block', score, components:{context,hitRate,lowHit,redundancy,stale},
+{ id, partition, source:'real'|'simulated', level:'ok'|'warn'|'block', score, components:{context,hitRate,lowHit,redundancy,stale},
   metrics:{estTokens,events,hits,redundantEvents}, reasons[], action:'continue'|'consolidate'|'hard-stop',
   directive, trunk:[{id,title,kind,importance,retention}], thresholds:{warn,block} }
 ```
