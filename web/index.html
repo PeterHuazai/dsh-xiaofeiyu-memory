@@ -437,6 +437,61 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
   .vec-res.err b{color:var(--bad)}
   .vec-res code{font-family:var(--font-mono);font-size:11.5px;color:var(--ink-2);word-break:break-all}
   .vec-res .ok{color:var(--teal)}
+
+  /* 检索与自检 */
+  .srow{cursor:pointer;transition:background .12s}
+  .srow:hover{background:var(--panel-2)}
+  td.snippet{max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-2);font-size:11.5px}
+  .pager{display:flex;align-items:center;gap:8px;margin-top:9px;font-size:11.5px;color:var(--ink-3)}
+  .pager .sp{flex:1}
+  .sum-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line);
+    border:1px solid var(--line);border-radius:var(--r);overflow:hidden;margin-bottom:10px}
+  .sum-grid>div{background:var(--panel);padding:8px 10px}
+  .sum-grid .k{font-size:10.5px;color:var(--ink-3);display:block;letter-spacing:.05em}
+  .sum-grid b{font-family:var(--font-display);font-size:19px;font-weight:600}
+  .sum-grid .s{font-size:10px;color:var(--ink-3);margin-left:4px}
+  .mini-chart{display:flex;align-items:flex-end;gap:2px;height:62px;border-bottom:1px solid var(--line-2);padding-bottom:2px}
+  .mini-day{flex:1 1 0;min-width:0;height:100%;display:flex;align-items:flex-end;gap:1px}
+  .mini-day i{display:block;flex:1 1 0;min-width:0;min-height:1px;border-radius:1px 1px 0 0;background:var(--teal);opacity:.5}
+  .mini-day i.mb-h{background:var(--gold);opacity:.9}
+  .mini-day:hover i{opacity:1}
+  .mini-cap{display:flex;justify-content:space-between;font-size:10px;color:var(--ink-3);margin-top:3px;font-family:var(--font-mono)}
+  .tri{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:12px}
+  .tri h4{font-size:11px;color:var(--ink-3);letter-spacing:.06em;margin-bottom:5px;font-weight:600}
+  .tri ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+  .tri li{font-size:11.5px;display:flex;gap:6px;align-items:baseline}
+  .tri li .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tri li .v{font-family:var(--font-mono);font-size:10.5px;color:var(--ink-3);white-space:nowrap}
+  .counts{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:1px;background:var(--line);
+    border:1px solid var(--line);border-radius:var(--r);overflow:hidden;margin-bottom:9px}
+  .counts>div{background:var(--panel);padding:6px 9px}
+  .counts .k{display:block;font-size:10px;color:var(--ink-3);letter-spacing:.05em}
+  .counts b{font-family:var(--font-mono);font-size:12.5px;font-weight:500}
+  .find{display:grid;grid-template-columns:auto minmax(0,1fr);gap:3px 9px;align-items:baseline;padding:8px 10px;
+    border:1px solid var(--line);border-radius:var(--r);background:var(--panel-2);margin-top:6px}
+  .find .code{font-family:var(--font-mono);font-size:10.5px;color:var(--ink-3)}
+  .find .msg{grid-column:1/-1;font-size:12px;color:var(--ink-2);line-height:1.55}
+  .mini-note{font-size:11px;color:var(--ink-3);margin-top:7px;line-height:1.6}
+  .detail-extra{grid-column:1/-1;border-top:1px solid var(--line);margin-top:3px;padding-top:11px;
+    display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:18px}
+  .detail-extra h4{font-size:11px;color:var(--ink-3);letter-spacing:.09em;font-weight:600;margin-bottom:5px}
+  .detail-extra .comp{grid-template-columns:112px minmax(0,1fr) 50px}
+  .why-flags{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:7px}
+  .why-flags .pill{font-size:10px}
+  .link-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:3px;max-height:170px;overflow:auto}
+  .link-list li{display:flex;gap:6px;align-items:baseline;font-size:11.5px;padding:3px 0;border-bottom:1px dotted var(--line)}
+  .link-list li:last-child{border-bottom:0}
+  .link-list .rel{font-family:var(--font-mono);font-size:10px;color:var(--gold-2);white-space:nowrap}
+  .link-list .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .link-list .dir{font-size:9.5px;color:var(--ink-3);border:1px solid var(--line-2);border-radius:2px;padding:0 3px}
+  .link-list .v{font-family:var(--font-mono);font-size:9.5px;color:var(--ink-3);white-space:nowrap}
+  .link-add{display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end;margin-top:8px}
+  .link-add .field{display:flex;flex-direction:column;gap:3px}
+  .link-add .field label{font-size:10.5px;color:var(--ink-3);letter-spacing:.05em}
+  .link-add input[type=text]{width:118px;font-size:11.5px;min-height:26px;padding:3px 6px}
+  @media (max-width:1120px){
+    .detail-extra{grid-template-columns:1fr}
+  }
 </style>
 </head>
 <body>
@@ -536,6 +591,123 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
     </div>
     <p class="hint-line">点任意行展开正文、标签、附件与该条召回历史；点「曲线」把该条叠加到记忆曲线图。</p>
   </section>
+
+  <section id="sec-tools" aria-labelledby="h-tools">
+    <div class="band-head">
+      <h2 id="h-tools">检索与自检</h2>
+      <span class="meta" id="toolsMeta">—</span>
+      <span class="rule"></span>
+      <span class="meta">search · digest · selfcheck · dedupe · summarize</span>
+    </div>
+
+    <div class="panel" id="pnl-search">
+      <div class="panel-head">
+        <span class="tick"></span>
+        <h2>库内检索</h2>
+        <span class="head-note" id="toolSearchMeta">—</span>
+        <span class="head-rule"></span>
+        <div class="head-tools">
+          <input type="search" id="toolQ" placeholder="检索标题 / 正文 / 标签" aria-label="检索记忆库">
+          <select id="toolSort" aria-label="检索排序">
+            <option value="score">相关度 ↓</option>
+            <option value="recent">最近更新 ↓</option>
+            <option value="oldest">最早更新 ↑</option>
+            <option value="importance">重要度 ↓</option>
+            <option value="retention">保留率 ↓</option>
+            <option value="hits">命中次数 ↓</option>
+          </select>
+          <button class="btn btn-gold" data-action="tool-search">检索</button>
+        </div>
+      </div>
+      <div class="tbl-scroll">
+        <table class="items">
+          <thead>
+            <tr>
+              <th style="min-width:210px">标题</th>
+              <th style="width:80px">类型</th>
+              <th style="width:66px">分数</th>
+              <th style="width:138px">保留率</th>
+              <th>摘要</th>
+              <th style="width:70px">操作</th>
+            </tr>
+          </thead>
+          <tbody id="toolSearchBody">
+            <tr><td colspan="6"><div class="empty"><b>尚未检索</b><span>输入词后按回车，例如「向量」</span></div></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="pager">
+        <span id="toolPageNote">—</span>
+        <span class="sp"></span>
+        <button class="btn btn-xs" data-action="tool-page" data-delta="-1" id="toolPrev" disabled>上一页</button>
+        <button class="btn btn-xs" data-action="tool-page" data-delta="1" id="toolNext" disabled>下一页</button>
+      </div>
+      <p class="hint-line">点行跳到「记忆条目」展开该条正文与召回历史；点「为什么」直接看打分拆解（检索词取上面的输入框）。</p>
+    </div>
+
+    <div class="grid-2">
+      <div class="panel" id="pnl-digest">
+        <div class="panel-head">
+          <span class="tick"></span>
+          <h2>摘要</h2>
+          <span class="head-rule"></span>
+          <div class="head-tools">
+            <select id="digestDays" aria-label="摘要区间">
+              <option value="1">近 1 天</option>
+              <option value="7" selected>近 7 天</option>
+              <option value="30">近 30 天</option>
+            </select>
+            <button class="btn btn-xs" data-action="digest-reload">刷新</button>
+          </div>
+        </div>
+        <div id="digestBody"><div class="empty"><b>摘要装载中</b></div></div>
+      </div>
+
+      <div class="panel" id="pnl-selfcheck">
+        <div class="panel-head">
+          <span class="tick"></span>
+          <h2>体检</h2>
+          <span class="head-rule"></span>
+          <div class="head-tools">
+            <button class="btn btn-xs" data-action="selfcheck-reload">重新体检</button>
+            <button class="btn btn-xs btn-gold" data-action="selfcheck-fix">修复</button>
+          </div>
+        </div>
+        <div id="selfcheckBody"><div class="empty"><b>体检装载中</b></div></div>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="panel" id="pnl-dedupe">
+        <div class="panel-head">
+          <span class="tick"></span>
+          <h2>查重</h2>
+          <span class="head-rule"></span>
+          <div class="head-tools">
+            <label class="sel" for="dedupeThreshold">阈值</label>
+            <input type="number" id="dedupeThreshold" min="0.5" max="1" step="0.01" value="0.92" style="width:76px" aria-label="查重阈值">
+            <button class="btn btn-xs" data-action="dedupe-run">查重</button>
+          </div>
+        </div>
+        <div id="dedupeBody"><div class="empty"><b>尚未查重</b><span>设阈值后点「查重」；0.5–1，越低越宽</span></div></div>
+      </div>
+
+      <div class="panel" id="pnl-summarize">
+        <div class="panel-head">
+          <span class="tick"></span>
+          <h2>归纳主干</h2>
+          <span class="head-rule"></span>
+          <div class="head-tools">
+            <label class="sel" for="sumLimit">条数</label>
+            <input type="number" id="sumLimit" min="2" max="40" step="1" value="12" style="width:64px" aria-label="归纳条数">
+            <button class="btn btn-xs btn-gold" data-action="summarize-run">归纳主干</button>
+          </div>
+        </div>
+        <div id="summarizeBody"><div class="empty"><b>尚未归纳</b><span>把重要条目压成一条钉住的主干，并取代旧主干</span></div></div>
+      </div>
+    </div>
+  </section>
+
 
   <div class="grid-2">
     <section class="panel" id="sec-curve" aria-labelledby="h-curve">

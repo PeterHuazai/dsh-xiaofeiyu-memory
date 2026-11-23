@@ -85,6 +85,8 @@ node src/cli.mjs task end <taskId> --summary "一句话结果" --md "## 做了�
 
 ## 看板
 
+![看板](docs/screenshots/dashboard-dark.png)
+
 `node src/server.mjs` 之后打开 <http://127.0.0.1:8787/>，单文件、无外网请求、随时能离线用：
 
 - 分区概览、记忆条目表、**记忆曲线**（悬停看某一天、点图例隐藏序列）
@@ -137,7 +139,8 @@ tests/run-tests.mjs 106 个断言
 ## 测试
 
 ```bash
-node tests/run-tests.mjs   # 通过 106 / 失败 0
+node tests/run-tests.mjs    # 通过 106 / 失败 0
+node tests/plugin-smoke.mjs # 插件形态冒烟：13 个工具真实注册并逐个调用（11 项全 PASS）
 ```
 
 覆盖：分区隔离、去重、index/full 两种召回、遗忘曲线与反馈、守卫硬阈值、汇报写删恢复清理、导入导出、
