@@ -40,11 +40,12 @@ function need(name) {
   return flags[name];
 }
 
-// 允许 `mem get m-xxx` 这种位置写法：cmd [sub] <id>
+// 允许 `mem get m-xxx` / `mem delete m-xxx` 两种位置写法：cmd [sub] <id>
 function argId() {
   if (flags.id !== undefined) return String(flags.id);
-  const at = rest[2] !== undefined ? rest[2] : undefined;
-  if (at !== undefined && at !== true) return String(at);
+  const pos = rest.filter(function (x) { return typeof x === 'string'; });
+  const at = pos.length > 1 ? pos[pos.length - 1] : (pos.length === 1 && pos[0] === cmd ? undefined : pos[0]);
+  if (at !== undefined) return String(at);
   console.error('missing --id');
   process.exit(2);
 }

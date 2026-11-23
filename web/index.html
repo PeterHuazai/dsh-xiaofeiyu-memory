@@ -491,6 +491,7 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
   .link-add input[type=text]{width:118px;font-size:11.5px;min-height:26px;padding:3px 6px}
   @media (max-width:1120px){
     .detail-extra{grid-template-columns:1fr}
+    #pnl-search td.snippet{max-width:200px}
   }
 </style>
 </head>
@@ -930,7 +931,17 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
     reportTab: 'active',
     caption: null,
     reportPath: null,
-    timer: null
+    timer: null,
+    tools: {
+      part: '', q: '', sort: 'score', limit: 10, offset: 0,
+      search: null, searchErr: null,
+      days: 7, digest: null, digestErr: null,
+      check: null, checkErr: null, fixing: false, fixedNote: null,
+      dedupe: null, dedupeErr: null, dedupeReq: null,
+      summarize: null, summarizeErr: null,
+      explain: {}, explainErr: {}, explainBusy: {},
+      links: {}, linksErr: {}, linkBusy: {}, linkMsg: {}
+    }
   };
 
   var KIND_LABEL = {
@@ -938,6 +949,10 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
     note: '笔记', task: '任务', report: '汇报', insight: '洞察', plan: '计划'
   };
   var STATE_LABEL = { active: '活跃', dormant: '休眠', archived: '归档', deleted: '已删除' };
+  var SORT_LABEL = {
+    score: '相关度', recent: '最近更新', oldest: '最早更新',
+    importance: '重要度', retention: '保留率', hits: '命中次数'
+  };
   var LEVEL_LABEL = { info: 'info', ok: 'ok', warn: 'warn', block: 'block' };
   var ACTION_TEXT = {
     continue: '继续：正常召回即可。',
@@ -1215,6 +1230,7 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
       renderRecycle();
       renderReports();
       renderCurve();
+      loadTools();
       return Promise.all([loadCurve(), loadRecycle(), loadReports(), loadCaption().catch(function () {})]);
     }).catch(function (err) {
       showBanner('无法读取 /api/state：' + (err && err.message ? err.message : err));
@@ -1377,9 +1393,14 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
             '<button class="btn btn-xs btn-danger" data-action="delete-item" data-id="' + esc(d.id) + '">删除</button>' +
           '</div>' +
         '</div>' +
+        detailExtraHtml(d) +
       '</div>';
     }
     return '<tr class="detail-row" data-detail-for="' + esc(it.id) + '"><td colspan="8">' + inner + '</td></tr>';
+  }
+
+  function detailExtraHtml(d) {
+    return '<div class="detail-extra">' + whyBlock(d.id) + linksBlock(d.id) + '</div>';
   }
 
   function renderItems() {
@@ -1403,7 +1424,7 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
   function loadDetail(id) {
     S.detail[id] = null;
     renderItems();
-    api('/api/item?id=' + encodeURIComponent(id) + '&days=' + displayDays()).then(function (d) {
+    return api('/api/item?id=' + encodeURIComponent(id) + '&days=' + displayDays()).then(function (d) {
       S.detail[id] = d;
       if (S.expandedId === id) renderItems();
     }).catch(function (err) {
@@ -1416,6 +1437,7 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
     if (S.expandedId === id) { S.expandedId = null; renderItems(); return; }
     S.expandedId = id;
     if (S.detail[id] === undefined) loadDetail(id); else renderItems();
+    if (S.tools.links[id] === undefined) loadLinks(id);
   }
 
   function focusCurveOn(id) {
@@ -1424,6 +1446,618 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
     loadCurve();
     var sec = $('#sec-curve');
     if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  /* ---------- 检索与自检 ---------- */
+  function toolsQ() {
+    var el = $('#toolQ');
+    return el ? el.value.trim() : '';
+  }
+
+  function loadTools(force) {
+    var t = S.tools;
+    var same = t.part === S.partition;
+    t.part = S.partition;
+    if (same && !force) return Promise.resolve();
+    var meta = $('#toolsMeta');
+    if (meta) meta.textContent = '分区 ' + (S.partition || '—');
+    if (!same) {
+      t.search = null; t.searchErr = null; t.offset = 0;
+      t.dedupe = null; t.dedupeErr = null; t.dedupeReq = null;
+      t.summarize = null; t.summarizeErr = null; t.fixedNote = null;
+      t.explain = {}; t.explainErr = {}; t.explainBusy = {};
+      t.links = {}; t.linksErr = {}; t.linkBusy = {}; t.linkMsg = {};
+    }
+    renderSearch();
+    renderDedupe();
+    renderSummarize();
+    return Promise.all([loadDigest(), loadSelfcheck(), (S.expandedId ? loadLinks(S.expandedId) : Promise.resolve())]);
+  }
+
+  function loadSearch(reset, delta) {
+    var t = S.tools;
+    if (reset) t.offset = 0;
+    if (delta) t.offset = Math.max(0, t.offset + delta * t.limit);
+    t.q = toolsQ();
+    t.sort = $('#toolSort') ? $('#toolSort').value : 'score';
+    t.searchErr = null;
+    var body = $('#toolSearchBody');
+    if (body) body.innerHTML = '<tr><td colspan="6">' + emptyBox('检索中', 'GET /api/search') + '</td></tr>';
+    var url = '/api/search?partition=' + encodeURIComponent(S.partition) +
+      '&q=' + encodeURIComponent(t.q) +
+      '&limit=' + t.limit + '&offset=' + t.offset +
+      '&sort=' + encodeURIComponent(t.sort);
+    return api(url).then(function (r) {
+      t.search = r;
+      renderSearch();
+    }).catch(function (err) {
+      t.search = null;
+      t.searchErr = err;
+      renderSearch();
+    });
+  }
+
+  function renderSearch() {
+    var t = S.tools;
+    var body = $('#toolSearchBody');
+    if (!body) return;
+    var meta = $('#toolSearchMeta');
+    var prev = $('#toolPrev');
+    var next = $('#toolNext');
+    var note = $('#toolPageNote');
+    if (t.searchErr) {
+      body.innerHTML = '<tr><td colspan="6">' + errBox('检索失败', t.searchErr, 'tool-search') + '</td></tr>';
+      if (meta) meta.textContent = '检索失败';
+      if (prev) prev.disabled = true;
+      if (next) next.disabled = true;
+      if (note) note.textContent = '—';
+      return;
+    }
+    var r = t.search;
+    if (!r) {
+      body.innerHTML = '<tr><td colspan="6">' + emptyBox('尚未检索', '输入词后按回车，例如「向量」') + '</td></tr>';
+      if (meta) meta.textContent = '—';
+      if (note) note.textContent = '—';
+      if (prev) prev.disabled = true;
+      if (next) next.disabled = true;
+      return;
+    }
+    var from = r.total ? r.offset + 1 : 0;
+    var to = Math.min(r.offset + r.limit, r.total);
+    if (meta) meta.textContent = '共 ' + num(r.total) + ' 条' + (r.q ? ' · 「' + r.q + '」' : ' · 全部') + ' · ' + (SORT_LABEL[r.sort] || r.sort || '');
+    if (note) note.textContent = '第 ' + num(from) + '–' + num(to) + ' 条 / 共 ' + num(r.total) + ' 条 · 每页 ' + r.limit;
+    if (prev) prev.disabled = r.offset <= 0;
+    if (next) next.disabled = r.offset + r.limit >= r.total;
+    if (!r.items.length) {
+      body.innerHTML = '<tr><td colspan="6">' + emptyBox('没有匹配的记忆', '换个关键词，或把排序改成「最近更新」') + '</td></tr>';
+      return;
+    }
+    body.innerHTML = r.items.map(srowHtml).join('');
+  }
+
+  function srowHtml(it) {
+    var kind = String(it.kind || '');
+    return '<tr class="srow" data-id="' + esc(it.id) + '" title="点开在「记忆条目」里展开这条">' +
+      '<td><div class="cell-title">' + (it.pinned ? '<span class="pin" title="pinned">钉</span>' : '') +
+        '<span class="t" title="' + esc(it.title) + '">' + esc(it.title || '(无标题)') + '</span></div></td>' +
+      '<td><span class="chip kind-' + esc(kind) + '">' + esc(KIND_LABEL[kind] || kind) + '</span></td>' +
+      '<td class="num">' + (it.score === null || it.score === undefined || isNaN(Number(it.score)) ? '—' : Number(it.score).toFixed(2)) + '</td>' +
+      '<td>' + retentionCell(it.retention) + '</td>' +
+      '<td class="snippet" title="' + esc(it.snippet) + '">' + esc(it.snippet || '—') + '</td>' +
+      '<td><button class="btn btn-xs" data-action="tool-why" data-id="' + esc(it.id) + '">为什么</button></td>' +
+    '</tr>';
+  }
+
+  function focusItem(id, withExplain) {
+    if (!id) return;
+    S.filters.q = '';
+    S.filters.kind = 'all';
+    S.filters.state = 'all';
+    if ($('#searchInput')) $('#searchInput').value = '';
+    S.expandedId = id;
+    var pending = [];
+    if (S.detail[id] === undefined) pending.push(loadDetail(id));
+    if (S.tools.links[id] === undefined) pending.push(loadLinks(id));
+    renderItems();
+    var sec = $('#sec-items');
+    if (sec && sec.scrollIntoView) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (withExplain) {
+      Promise.all(pending).then(function () { loadExplain(id); });
+    }
+  }
+
+  function loadDigest() {
+    var t = S.tools;
+    var days = $('#digestDays') ? Number($('#digestDays').value || 7) : 7;
+    t.days = days;
+    t.digestErr = null;
+    if ($('#digestBody')) $('#digestBody').innerHTML = emptyBox('摘要装载中', 'GET /api/digest');
+    return api('/api/digest?partition=' + encodeURIComponent(S.partition) + '&days=' + days).then(function (d) {
+      t.digest = d;
+      renderDigest();
+    }).catch(function (err) {
+      t.digest = null;
+      t.digestErr = err;
+      renderDigest();
+    });
+  }
+
+  function triList(title, arr, key) {
+    var list = arr || [];
+    return '<div><h4>' + esc(title) + '</h4>' + (list.length
+      ? '<ul>' + list.slice(0, 5).map(function (x) {
+          var v = key === 'hitCount' ? (num(x.hitCount) + ' 命中') : pct(x.retention);
+          return '<li><span class="t" title="' + esc(x.title) + '">' + esc(x.title || '(无标题)') + '</span>' +
+            '<span class="v">' + v + '</span></li>';
+        }).join('') + '</ul>'
+      : '<div class="mini-note">无</div>') + '</div>';
+  }
+
+  function dailyChartHtml(daily) {
+    var rows = (daily || []).slice(-30);
+    if (!rows.length) return '<div class="mini-note">区间内没有按天数据。</div>';
+    var max = 1;
+    rows.forEach(function (x) {
+      max = Math.max(max, Number(x.created || 0), Number(x.hits || 0));
+    });
+    var bars = rows.map(function (x) {
+      var c = Number(x.created || 0);
+      var h = Number(x.hits || 0);
+      return '<div class="mini-day" title="' + esc(x.day) + ' · 新增 ' + c + ' · 命中 ' + h + '">' +
+        '<i style="height:' + Math.max(1, Math.round(c / max * 100)) + '%"></i>' +
+        '<i class="mb-h" style="height:' + Math.max(1, Math.round(h / max * 100)) + '%"></i>' +
+      '</div>';
+    }).join('');
+    return '<div class="legend" style="margin-bottom:5px">' +
+        '<span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--ink-3)"><i class="sw-bar" style="background:var(--teal);opacity:.55"></i>新增</span>' +
+        '<span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--ink-3)"><i class="sw-bar" style="background:var(--gold)"></i>命中</span>' +
+        '<span style="font-size:10.5px;color:var(--ink-3);margin-left:auto">0 — ' + num(max) + '</span>' +
+      '</div>' +
+      '<div class="mini-chart">' + bars + '</div>' +
+      '<div class="mini-cap"><span>' + esc(rows[0].day) + '</span><span>' + rows.length + ' 天</span><span>' + esc(rows[rows.length - 1].day) + '</span></div>';
+  }
+
+  function renderDigest() {
+    var t = S.tools;
+    var box = $('#digestBody');
+    if (!box) return;
+    var html = '';
+    if (t.digestErr) html += errBox('摘要读取失败', t.digestErr, 'digest-reload');
+    var d = t.digest;
+    if (!d) {
+      box.innerHTML = html || emptyBox('摘要装载中', 'GET /api/digest');
+      return;
+    }
+    var rec = d.recall || {};
+    var items = d.items || {};
+    var g = d.guards || {};
+    html += '<div class="sum-grid">' +
+        '<div><span class="k">新增 / 更新</span><b>' + num(items.created) + '</b><span class="s">/ ' + num(items.updated) + '</span></div>' +
+        '<div><span class="k">召回次数</span><b>' + num(rec.events) + '</b><span class="s">判读 ' + num(rec.judged) + '</span></div>' +
+        '<div><span class="k">命中率</span><b>' + pct(rec.hitRate) + '</b><span class="s">' + num(rec.hits) + ' 命中</span></div>' +
+      '</div>' +
+      '<p class="hint-line" style="margin:0 0 9px">守卫事件：ok ' + num(g.ok || 0) + ' · warn ' + num(g.warn || 0) + ' · block ' + num(g.block || 0) +
+        ' · 召回返回 ' + num(rec.returned) + ' 条 · 区间 ' + esc(dt(d.from)) + ' → ' + esc(dt(d.to)) + '</p>' +
+      dailyChartHtml(d.daily) +
+      '<div class="tri">' +
+        triList('快忘（低于遗忘阈值）', d.nearForget, 'retention') +
+        triList('冷掉（区间内没被访问）', d.cooling, 'retention') +
+        triList('最热（命中最多）', d.hottest, 'hitCount') +
+      '</div>';
+    box.innerHTML = html;
+  }
+
+  function bytes(n) {
+    var v = Number(n || 0);
+    if (v < 1024) return num(v) + ' B';
+    if (v < 1048576) return (v / 1024).toFixed(1) + ' KB';
+    return (v / 1048576).toFixed(1) + ' MB';
+  }
+
+  function loadSelfcheck() {
+    var t = S.tools;
+    t.checkErr = null;
+    if ($('#selfcheckBody')) $('#selfcheckBody').innerHTML = emptyBox('体检装载中', 'GET /api/selfcheck');
+    return api('/api/selfcheck?partition=' + encodeURIComponent(S.partition)).then(function (d) {
+      t.check = d;
+      t.fixedNote = null;
+      renderSelfcheck();
+    }).catch(function (err) {
+      t.check = null;
+      t.checkErr = err;
+      renderSelfcheck();
+    });
+  }
+
+  function findHtml(f) {
+    var sev = String(f.severity || 'info');
+    var cls = sev === 'block' ? 'lv-block' : (sev === 'warn' ? 'lv-warn' : 'lv-info');
+    return '<div class="find"><span class="pill ' + cls + '">' + esc(sev) + '</span>' +
+      '<span class="code">' + esc(f.code || '') + '</span>' +
+      '<span class="msg">' + esc(f.detail || '') + '</span></div>';
+  }
+
+  function renderSelfcheck() {
+    var t = S.tools;
+    var box = $('#selfcheckBody');
+    if (!box) return;
+    var html = '';
+    if (t.checkErr) html += errBox('体检失败', t.checkErr, 'selfcheck-reload');
+    var d = t.check;
+    if (!d) {
+      box.innerHTML = html || emptyBox('体检装载中', 'GET /api/selfcheck');
+      return;
+    }
+    var lv = String(d.level || 'info');
+    var cls = lv === 'ok' ? 'ok' : (lv === 'warn' ? 'warn' : (lv === 'block' ? 'block' : 'info'));
+    var lvText = { ok: '正常', warn: '需要留意', block: '必须处理', info: '信息不足' }[lv] || lv;
+    var c = d.counts || {};
+    var s = d.storage || {};
+    var integ = d.integrity || {};
+    html += '<div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:9px">' +
+        '<span class="badge ' + cls + '"><span class="dot"></span><span>level ' + esc(lv) + ' · ' + esc(lvText) + '</span></span>' +
+        '<span class="head-note">' + esc(d.partition || '') + '</span>' +
+        (t.fixing ? '<span class="head-note">修复中…</span>' : '') +
+      '</div>';
+    if (t.fixedNote !== null && t.fixedNote !== undefined) {
+      html += '<div class="mini-note" style="color:var(--teal-2)">本次修复 fixed ' + num(t.fixedNote) + ' 条（补向量 / 删悬空关联）</div>';
+    }
+    html += '<div class="counts">' + [
+        ['条目', c.items], ['活跃', c.active], ['主干', c.trunk], ['附件', c.attachments],
+        ['缺向量', c.missingVector], ['影子文件', c.shadowFiles], ['备份', c.backups]
+      ].map(function (kv) {
+        return '<div><span class="k">' + kv[0] + '</span><b>' + num(kv[1]) + '</b></div>';
+      }).join('') + '</div>';
+    html += '<div class="mini-note">存储：影子 ' + esc(bytes(s.shadowBytes)) +
+      ' · 最近备份 ' + (s.backupAgeHours === null || s.backupAgeHours === undefined ? '—' : Number(s.backupAgeHours).toFixed(1) + ' 小时前') +
+      ' · 完整性 ' + (integ.ok ? '<span class="sev-low">正常</span>' : '<span class="sev-high">异常</span>') +
+      (integ.detail ? '（' + esc(integ.detail) + '）' : '') + '</div>';
+    var fs = d.findings || [];
+    html += '<h4 style="font-size:11px;color:var(--ink-3);letter-spacing:.09em;margin:11px 0 0">findings ' + fs.length + '</h4>';
+    html += fs.length ? fs.map(findHtml).join('') : '<div class="mini-note">没有发现问题。</div>';
+    box.innerHTML = html;
+  }
+
+  function runSelfcheckFix() {
+    var t = S.tools;
+    confirmBox({
+      title: '执行体检修复？',
+      body: '会补建缺失的向量、删除指向已不存在条目的悬空关联。不删除记忆条目，但会写盘。',
+      target: '分区 ' + S.partition,
+      okText: '修复',
+      safe: true
+    }).then(function (r) {
+      if (!r.ok) return;
+      t.fixing = true;
+      renderSelfcheck();
+      api('/api/selfcheck?partition=' + encodeURIComponent(S.partition) + '&fix=1').then(function (res) {
+        t.fixing = false;
+        t.check = res;
+        t.checkErr = null;
+        t.fixedNote = Number(res.fixed || 0);
+        renderSelfcheck();
+        toast('修复完成，fixed ' + t.fixedNote + ' 条', t.fixedNote ? 'gold' : undefined);
+        if (t.fixedNote) load(S.partition).catch(function () {});
+      }).catch(function (err) {
+        t.fixing = false;
+        t.checkErr = err;
+        renderSelfcheck();
+      });
+    });
+  }
+
+  function loadDedupe() {
+    var t = S.tools;
+    var th = Number($('#dedupeThreshold') ? $('#dedupeThreshold').value : 0.92);
+    if (!(th >= 0 && th <= 1)) th = 0.92;
+    t.dedupeReq = th;
+    t.dedupeErr = null;
+    if ($('#dedupeBody')) $('#dedupeBody').innerHTML = emptyBox('查重中', 'GET /api/dedupe');
+    return api('/api/dedupe?partition=' + encodeURIComponent(S.partition) + '&threshold=' + th).then(function (r) {
+      t.dedupe = r;
+      renderDedupe();
+    }).catch(function (err) {
+      t.dedupe = null;
+      t.dedupeErr = err;
+      renderDedupe();
+    });
+  }
+
+  function renderDedupe() {
+    var t = S.tools;
+    var box = $('#dedupeBody');
+    if (!box) return;
+    var html = '';
+    if (t.dedupeErr) html += errBox('查重失败', t.dedupeErr, 'dedupe-run');
+    var d = t.dedupe;
+    if (!d) {
+      box.innerHTML = html || emptyBox('尚未查重', '设阈值后点「查重」；0.5–1，越低越宽');
+      return;
+    }
+    var req = t.dedupeReq;
+    html += '<p class="hint-line" style="margin:0 0 9px">扫描 ' + num(d.scanned) + ' 条 · 命中 ' + num(d.total) + ' 对 · 阈值 ' + Number(d.threshold).toFixed(2) +
+      (req !== null && req !== undefined && Math.abs(Number(d.threshold) - Number(req)) > 1e-9
+        ? '（请求 ' + Number(req).toFixed(2) + ' 被后端夹到 ' + Number(d.threshold).toFixed(2) + '，后端最低 0.5）'
+        : '') + '</p>';
+    if (!d.pairs.length) {
+      box.innerHTML = html + emptyBox('没有相似度超过阈值的条目', '把阈值调低再试（后端最低 0.5）');
+      return;
+    }
+    html += '<div class="list">' + d.pairs.map(function (p) {
+      return '<div class="row-card">' +
+        '<div class="top"><b>相似度 ' + pct(p.similarity) + '</b>' +
+          '<span class="score">jaccard ' + Number(p.jaccard || 0).toFixed(2) + ' · cosine ' + Number(p.cosine || 0).toFixed(2) + '</span></div>' +
+        '<div class="meta">保留 ' + esc((p.keep && p.keep.title) || (p.keep && p.keep.id) || '') + '</div>' +
+        '<div class="meta">建议删 ' + esc((p.drop && p.drop.title) || (p.drop && p.drop.id) || '') + '</div>' +
+        '<div class="directive">' + esc(p.suggestion || '') + '</div>' +
+      '</div>';
+    }).join('') + '</div>';
+    box.innerHTML = html;
+  }
+
+  function runSummarize() {
+    var t = S.tools;
+    var limit = Number($('#sumLimit') ? $('#sumLimit').value : 12);
+    if (!(limit >= 2 && limit <= 40)) {
+      toast('归纳条数需在 2–40 之间', 'bad');
+      return;
+    }
+    confirmBox({
+      title: '归纳主干？',
+      body: '会新建一条钉住的主干记忆（kind=trunk），并把旧的钉住主干标记为「已被取代」。写入不可自动撤销。',
+      target: '分区 ' + S.partition + ' · 取前 ' + limit + ' 条重要记忆',
+      okText: '归纳',
+      safe: true
+    }).then(function (r) {
+      if (!r.ok) return;
+      t.summarizeErr = null;
+      if ($('#summarizeBody')) $('#summarizeBody').innerHTML = emptyBox('归纳中', 'POST /api/summarize');
+      api('/api/summarize', { method: 'POST', body: JSON.stringify({ partition: S.partition, limit: limit }) }).then(function (res) {
+        t.summarize = res;
+        renderSummarize();
+        if (res.created) {
+          toast('主干已创建：' + ((res.item && res.item.title) || ''), 'gold');
+          load(S.partition).catch(function () {});
+        } else {
+          toast('没有创建新主干', 'bad');
+        }
+      }).catch(function (err) {
+        t.summarize = null;
+        t.summarizeErr = err;
+        renderSummarize();
+      });
+    });
+  }
+
+  function renderSummarize() {
+    var t = S.tools;
+    var box = $('#summarizeBody');
+    if (!box) return;
+    var html = '';
+    if (t.summarizeErr) html += errBox('归纳失败', t.summarizeErr, 'summarize-run');
+    var r = t.summarize;
+    if (!r) {
+      box.innerHTML = html || emptyBox('尚未归纳', '把重要条目压成一条钉住的主干，并取代旧主干');
+      return;
+    }
+    if (!r.created) {
+      box.innerHTML = html + '<div class="mini-note">没有创建：' + esc(r.reason || '没有可归纳的条目') + '</div>';
+      return;
+    }
+    var src = r.sources || [];
+    html += '<div class="gres" style="margin-top:0">' +
+        '<div class="hd"><span class="pill lv-ok">created</span>' +
+          '<b style="font-size:12.5px">' + esc((r.item && r.item.title) || r.item && r.item.id || '主干') + '</b></div>' +
+        '<div class="mini-note">来源 ' + src.length + ' 条 · 取代旧主干 ' + ((r.superseded || []).length) + ' 条' +
+          (r.item && r.item.id ? ' · id ' + esc(r.item.id) : '') + '</div>' +
+        (src.length ? '<ul class="trunk">' + src.map(function (s) {
+          return '<li><span class="imp">' + esc(KIND_LABEL[s.kind] || s.kind || '') + '</span><span>' + esc(s.title) + '</span></li>';
+        }).join('') + '</ul>' : '') +
+      '</div>';
+    box.innerHTML = html;
+  }
+
+  function compRow(label, val, cls) {
+    var v = Number(val || 0);
+    var w = Math.max(2, Math.min(100, Math.round(Math.abs(v) * 100)));
+    return '<div class="comp"><span class="lbl">' + esc(label) + '</span>' +
+      '<span class="track"><i class="' + (cls || (v > 0 ? 'hot' : 'crit')) + '" style="width:' + w + '%"></i></span>' +
+      '<span class="v">' + v.toFixed(3) + '</span></div>';
+  }
+
+  function loadExplain(id) {
+    var t = S.tools;
+    t.explainBusy[id] = true;
+    t.explainErr[id] = null;
+    renderItems();
+    var q = toolsQ();
+    return api('/api/explain?id=' + encodeURIComponent(id) + (q ? '&query=' + encodeURIComponent(q) : '')).then(function (ex) {
+      t.explain[id] = ex;
+      t.explainBusy[id] = false;
+      renderItems();
+    }).catch(function (err) {
+      t.explain[id] = undefined;
+      t.explainErr[id] = err;
+      t.explainBusy[id] = false;
+      renderItems();
+    });
+  }
+
+  function whyBlock(id) {
+    var t = S.tools;
+    var ex = t.explain[id];
+    var err = t.explainErr[id];
+    var html = '<div><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+        '<h4 style="margin:0">为什么被召回</h4>' +
+        '<span class="head-note">检索词「' + esc(toolsQ() || '（空）') + '」</span>' +
+        '<button class="btn btn-xs" data-action="why-refresh" data-id="' + esc(id) + '">' +
+          (ex || err ? '重新解释' : '为什么') + '</button>' +
+      '</div>';
+    if (t.explainBusy[id]) {
+      return html + '<div class="mini-note">解释中…</div></div>';
+    }
+    if (err) {
+      return html + errBox('解释失败', err) + '</div>';
+    }
+    if (!ex) {
+      return html + '<div class="mini-note">点「为什么」看这条的衰减字段与打分拆解。</div></div>';
+    }
+    var it = ex.item || {};
+    html += '<div class="why-flags" style="margin-top:7px">' +
+        '<span class="pill ' + (it.pinned ? 'lv-warn' : 'lv-info') + '">' + (it.pinned ? '钉住' : '未钉') + '</span>' +
+        '<span class="pill lv-info">' + esc(STATE_LABEL[it.state] || it.state || '') + '</span>' +
+        '<span class="pill lv-info">' + esc(KIND_LABEL[it.kind] || it.kind || '') + '</span>' +
+        '<span class="pill ' + (Number(it.daysUntilForget) <= 3 ? 'lv-block' : 'lv-info') + '">' +
+          (it.daysUntilForget === null || it.daysUntilForget === undefined
+            ? '不会遗忘'
+            : (Number(it.daysUntilForget) <= 0 ? '已过遗忘线' : num(Math.ceil(Number(it.daysUntilForget))) + ' 天后过遗忘线')) +
+        '</span>' +
+      '</div>';
+    html += '<dl class="kv" style="grid-template-columns:84px 1fr">' +
+        '<dt>retention</dt><dd>' + pct(it.retention, 2) + '</dd>' +
+        '<dt>stability</dt><dd>' + esc(it.stability) + ' 天</dd>' +
+        '<dt>ageDays</dt><dd>' + esc(it.ageDays === null || it.ageDays === undefined ? '—' : Number(it.ageDays).toFixed(1)) + ' 天</dd>' +
+        '<dt>遗忘阈值</dt><dd>' + esc(it.forgetThreshold) + '</dd>' +
+        '<dt>召回 / 命中</dt><dd>' + num(it.accessCount) + ' / ' + num(it.hitCount) + '</dd>' +
+      '</dl>';
+    var c = ex.components;
+    if (c) {
+      html += '<div class="comps">' +
+          compRow('relevance', c.relevance) +
+          compRow('cos', c.cos) +
+          compRow('retentionFactor', c.retentionFactor) +
+          compRow('importanceFactor', c.importanceFactor) +
+          compRow('score', c.score, c.passesMinScore ? 'hot' : 'crit') +
+        '</div>' +
+        '<div class="mini-note">blended ' + Number(c.blended || 0).toFixed(3) +
+          ' · pinnedBoost ' + Number(c.pinnedBoost || 0).toFixed(3) +
+          ' · minScore ' + Number(c.minScore || 0).toFixed(2) + ' · ' +
+          (c.passesMinScore ? '<span class="sev-low">通过 minScore</span>' : '<span class="sev-high">低于 minScore</span>') + '</div>' +
+        '<div class="mini-note" style="font-family:var(--font-mono);font-size:10px">' + esc(ex.formula || '') + '</div>';
+    } else {
+      html += '<div class="mini-note">' + esc(ex.note || '没有打分拆解：先在上方检索框填词再点。') + '</div>';
+    }
+    var evs = ex.events || [];
+    html += '<h4 style="margin-top:10px">这条的召回历史 ' + (evs.length ? '(' + evs.length + ')' : '') + '</h4>' +
+      (evs.length ? '<ul class="ev-list">' + evs.map(function (e) {
+        return '<li><time>' + esc(dt(e.ts)) + '</time>' +
+          '<span class="q" title="' + esc(e.query) + '">' + esc(e.query || '') + '</span>' +
+          '<span class="' + (e.used === 1 ? 'sev-low' : 'muted') + '" style="font-size:10.5px">' +
+            (e.used === 1 ? '命中' : (e.used === 0 ? '未用' : '未反馈')) + '</span></li>';
+      }).join('') + '</ul>' : '<div class="mini-note">还没有召回记录</div>');
+    return html + '</div>';
+  }
+
+  function loadLinks(id) {
+    var t = S.tools;
+    t.linkBusy[id] = 'list';
+    t.linksErr[id] = null;
+    return api('/api/links?id=' + encodeURIComponent(id)).then(function (lk) {
+      t.links[id] = lk;
+      t.linkBusy[id] = null;
+      if (S.expandedId === id) renderItems();
+    }).catch(function (err) {
+      t.linksErr[id] = err;
+      t.linkBusy[id] = null;
+      if (S.expandedId === id) renderItems();
+    });
+  }
+
+  function linkRow(id, l, dir) {
+    var other = dir === 'out' ? (l.to_id || l.id) : (l.from_id || l.id);
+    var from = dir === 'out' ? id : other;
+    var to = dir === 'out' ? other : id;
+    return '<li><span class="dir">' + (dir === 'out' ? '出' : '入') + '</span>' +
+      '<span class="rel">' + esc(l.relation || '') + '</span>' +
+      '<span class="t" title="' + esc(l.title) + '">' + esc(l.title || other) + '</span>' +
+      '<span class="v">' + esc(String(other || '').slice(0, 16)) + '</span>' +
+      '<button class="btn btn-xs" data-action="tool-link-del" data-from="' + esc(from) + '" data-to="' + esc(to) + '">删</button></li>';
+  }
+
+  function linksBlock(id) {
+    var t = S.tools;
+    var lk = t.links[id];
+    var err = t.linksErr[id];
+    var msg = t.linkMsg[id];
+    var html = '<div><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+        '<h4 style="margin:0">关联</h4>' +
+        '<span class="head-note">' + (lk ? (num((lk.out || []).length) + ' 出 · ' + num((lk.back || []).length) + ' 入') : '—') + '</span>' +
+        '<button class="btn btn-xs" data-action="tool-links" data-id="' + esc(id) + '">刷新</button>' +
+      '</div>';
+    if (t.linkBusy[id] === 'list') html += '<div class="mini-note">读取中…</div>';
+    if (err) html += errBox('关联读取失败', err);
+    if (lk) {
+      var out = lk.out || [];
+      var back = lk.back || [];
+      html += (out.length || back.length)
+        ? '<ul class="link-list">' + out.map(function (l) { return linkRow(id, l, 'out'); }).join('') +
+          back.map(function (l) { return linkRow(id, l, 'back'); }).join('') + '</ul>'
+        : '<div class="mini-note">这条还没有关联。</div>';
+    }
+    if (msg) {
+      html += '<div class="mini-note" style="color:' + (msg.bad ? 'var(--red)' : 'var(--teal-2)') + '">' + esc(msg.text) + '</div>';
+    }
+    var cands = ((S.state && S.state.items) || []).filter(function (it) {
+      return it.id !== id && it.state !== 'deleted';
+    }).slice(0, 60);
+    html += '<div class="link-add">' +
+        '<div class="field"><label for="linkTo">关联到条目 id</label>' +
+          '<input type="text" id="linkTo" list="linkCands" placeholder="同分区条目 id" autocomplete="off"></div>' +
+        '<div class="field"><label for="linkRel">relation</label>' +
+          '<input type="text" id="linkRel" value="related" placeholder="related" style="width:92px"></div>' +
+        '<button class="btn btn-xs btn-gold" data-action="tool-link-add" data-id="' + esc(id) + '">新建关联</button>' +
+      '</div>' +
+      '<datalist id="linkCands">' + cands.map(function (it) {
+        return '<option value="' + esc(it.id) + '">' + esc(it.title) + '</option>';
+      }).join('') + '</datalist>' +
+      '<div class="mini-note">只接受同一分区内的条目 id；跨分区会被后端拒绝。</div>' +
+    '</div>';
+    return html;
+  }
+
+  function addLink(fromId) {
+    var t = S.tools;
+    var to = $('#linkTo') ? $('#linkTo').value.trim() : '';
+    var relEl = $('#linkRel');
+    var rel = (relEl && relEl.value.trim()) || 'related';
+    if (!to) {
+      t.linkMsg[fromId] = { text: '先填一个同分区的条目 id。', bad: true };
+      renderItems();
+      return;
+    }
+    t.linkBusy[fromId] = 'add';
+    t.linkMsg[fromId] = null;
+    renderItems();
+    api('/api/link', { method: 'POST', body: JSON.stringify({ from: fromId, to: to, relation: rel }) }).then(function (res) {
+      t.linkBusy[fromId] = null;
+      t.linkMsg[fromId] = { text: res.created ? ('已新建关联 ' + rel + ' → ' + to) : '这条关联本来就有，未重复创建', bad: !res.created };
+      if (res.created) toast('已新建关联', 'gold');
+      loadLinks(fromId).catch(function () {});
+    }).catch(function (err) {
+      t.linkBusy[fromId] = null;
+      t.linkMsg[fromId] = { text: (err && err.message) || '创建关联失败', bad: true };
+      renderItems();
+    });
+  }
+
+  function removeLink(from, to) {
+    var t = S.tools;
+    confirmBox({
+      title: '删除这条关联？',
+      body: '只删关联，不删任何记忆条目。',
+      target: from + ' → ' + to,
+      okText: '删除',
+      safe: false
+    }).then(function (r) {
+      if (!r.ok) return;
+      api('/api/unlink', { method: 'POST', body: JSON.stringify({ from: from, to: to }) }).then(function (res) {
+        t.linkMsg[from] = { text: '已删除 ' + num(res.removed) + ' 条关联', bad: !res.removed };
+        loadLinks(from).catch(function () {});
+      }).catch(function (err) {
+        t.linkMsg[from] = { text: (err && err.message) || '删除关联失败', bad: true };
+        renderItems();
+      });
+    });
   }
 
 
@@ -2458,6 +3092,7 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
     var btn = $('#refreshBtn');
     if (btn) btn.disabled = true;
     return Promise.all([loadHealth(), loadConfig(), loadVector(), load(S.partition || undefined)])
+      .then(function () { return loadTools(true); })
       .catch(function () {})
       .then(function () {
         if (btn) btn.disabled = false;
@@ -2498,6 +3133,22 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
     });
     $('#guardForm').addEventListener('submit', runGuardCheck);
     $('#auditRefresh').addEventListener('click', loadAudit);
+    var tq = $('#toolQ');
+    if (tq) {
+      tq.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); loadSearch(true); }
+      });
+    }
+    var tsort = $('#toolSort');
+    if (tsort) tsort.addEventListener('change', function () { loadSearch(true); });
+    var ddays = $('#digestDays');
+    if (ddays) ddays.addEventListener('change', function () { loadDigest(); });
+    var dth = $('#dedupeThreshold');
+    if (dth) {
+      dth.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); loadDedupe(); }
+      });
+    }
     $('#cfgSave').addEventListener('click', saveConfig);
     $('#cfgReset').addEventListener('click', function () {
       S.dirty = {};
@@ -2566,10 +3217,24 @@ tr.detail-row td{padding:0;border-bottom:1px solid var(--line-2);background:colo
         else if (a === 'vector-reload') loadVector().catch(function () {});
         else if (a === 'vector-reindex') runVector('reindex');
         else if (a === 'vector-enrich') runVector('enrich');
+        else if (a === 'tool-search') loadSearch(true);
+        else if (a === 'tool-page') loadSearch(false, Number(act.dataset.delta || 0));
+        else if (a === 'tool-why') focusItem(act.dataset.id, true);
+        else if (a === 'why-refresh') loadExplain(act.dataset.id);
+        else if (a === 'digest-reload') loadDigest();
+        else if (a === 'selfcheck-reload') loadSelfcheck();
+        else if (a === 'selfcheck-fix') runSelfcheckFix();
+        else if (a === 'dedupe-run') loadDedupe();
+        else if (a === 'summarize-run') runSummarize();
+        else if (a === 'tool-links') loadLinks(act.dataset.id);
+        else if (a === 'tool-link-add') addLink(act.dataset.id);
+        else if (a === 'tool-link-del') removeLink(act.dataset.from, act.dataset.to);
         return;
       }
       var th = ev.target.closest('th.sortable');
       if (th) { setSort(th.dataset.sort); return; }
+      var srow = ev.target.closest('tr.srow');
+      if (srow && !ev.target.closest('button')) { focusItem(srow.dataset.id); return; }
       var row = ev.target.closest('tr.row');
       if (row && !ev.target.closest('button')) { toggleItem(row.dataset.id); return; }
     });
