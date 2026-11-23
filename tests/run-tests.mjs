@@ -381,6 +381,10 @@ ok(!hl.findings.some(function (x) { return x.code === 'NO_TRUNK'; }), 'summarize
 store.db.prepare('INSERT INTO item_link (id, partition_id, from_id, to_id, relation, created_at) VALUES (?, ?, ?, ?, ?, ?)').run('l-broken', t31.id, 'm-missing', s1.id, 'ghost', Date.now());
 const hlFix = xfy.health(store, { partition: 'p-tools', fix: true });
 ok(hlFix.fixed >= 1 && !hlFix.findings.some(function (x) { return x.code === 'DANGLING_LINKS'; }), 'health --fix 清掉悬空关联', hlFix.fixed);
+backup(store);
+const hlStore = xfy.health(store, {});
+ok(hlStore.counts.backups >= 1 && hlStore.storage.backupAgeHours !== null, 'health 数得到 backups（路径用 store.backupDir）', { backups: hlStore.counts.backups, age: hlStore.storage.backupAgeHours });
+ok(hlStore.storage.shadowBytes > 0, 'health 数得到影子日志字节数（路径用 store.shadowDir）', hlStore.storage.shadowBytes);
 
 console.log('\n通过 ' + pass + ' / 失败 ' + fail);
 if (fail) { console.log(failures.join('\n')); process.exit(1); }

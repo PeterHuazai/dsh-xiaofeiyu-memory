@@ -5,7 +5,7 @@
 这是一个 **DeepSeek Harness（DSH）插件**，也是一套可以独立运行的本地记忆库：
 多轮长对话里最容易出问题的两件事 ——「记住不该混的」和「忘掉不该记的」—— 它都做了工程化处理。
 
-> 作者说明：这是**非人工智能专业的学生**拿 DeepSeek Harness 写着玩的插件。功能是真的能跑（106 个自动化测试全绿），
+> 作者说明：这是**非人工智能专业的学生**拿 DeepSeek Harness 写着玩的插件。功能是真的能跑（108 个自动化测试全绿），
 > 但设计上一定还有不少幼稚和可以改进的地方，欢迎大家指正和评价，不喜也勿喷 🙏
 
 ---
@@ -114,7 +114,7 @@ src/tools.mjs       search/digest/explain/link/expand/pin/health/dedupe/summariz
 src/server.mjs      HTTP API + 静态看板
 src/cli.mjs         命令行
 web/index.html      看板（单文件内联）
-tests/run-tests.mjs 106 个断言
+tests/run-tests.mjs 108 个断言
 ```
 
 ## 参数（都能在看板里改，`updateConfig` 会按合理区间夹紧）
@@ -142,7 +142,7 @@ tests/run-tests.mjs 106 个断言
 ## 测试
 
 ```bash
-node tests/run-tests.mjs    # 通过 106 / 失败 0
+node tests/run-tests.mjs    # 通过 108 / 失败 0
 node tests/plugin-smoke.mjs # 插件形态冒烟：13 个工具真实注册并逐个调用（11 项全 PASS）
 ```
 

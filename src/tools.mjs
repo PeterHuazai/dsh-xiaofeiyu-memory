@@ -401,7 +401,7 @@ export function health(store, input) {
   if (Number(badLinks.n) > 0) findings.push({ code: 'DANGLING_LINKS', severity: 'warn', detail: Number(badLinks.n) + ' 条关联指向不存在的条目（mem health --fix 可清）' });
   const integ = integrity(store);
   if (!integ.ok) findings.push({ code: 'DB_INTEGRITY', severity: 'block', detail: String(integ.detail || 'quick_check 失败') });
-  const shadowDir = path.join(root, 'shadow');
+  const shadowDir = store.shadowDir || path.join(root, 'data', 'shadow');
   let shadowFiles = 0;
   let shadowBytes = 0;
   if (fs.existsSync(shadowDir)) {
@@ -411,7 +411,7 @@ export function health(store, input) {
       if (st.isFile()) { shadowFiles += 1; shadowBytes += st.size; }
     }
   }
-  const backupDir = path.join(root, 'backups');
+  const backupDir = store.backupDir || path.join(root, 'data', 'backups');
   const backups = fs.existsSync(backupDir) ? fs.readdirSync(backupDir).filter(function (f) { return f.endsWith('.db'); }) : [];
   const newest = backups.length ? Math.max.apply(null, backups.map(function (f) { return fs.statSync(path.join(backupDir, f)).mtimeMs; })) : 0;
   const backupAgeHours = newest ? Number(((nowMs() - newest) / 3600000).toFixed(1)) : null;
