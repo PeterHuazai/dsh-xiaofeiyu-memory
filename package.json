@@ -1,0 +1,75 @@
+{
+  "name": "dsh-xiaofeiyu-memory",
+  "version": "0.1.0",
+  "description": "DSH 插件 + 独立记忆库：分区隔离的长期记忆、遗忘曲线、命中率看板、幻觉守卫、向量召回，一条命令一套数据全在本地。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "memory",
+    "long-term-memory",
+    "forgetting-curve",
+    "rag",
+    "sqlite",
+    "dashboard"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "xfy-mem": "src/cli.mjs"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "src",
+    "web",
+    "docs",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "AGENTS.md"
+  ],
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node tests/run-tests.mjs",
+    "check": "node tests/run-tests.mjs"
+  },
+  "engines": {
+    "dsh": ">=0.1.7-rc.1",
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "sqlite-vec": "^0.1.9",
+    "sqlite-vec-windows-x64": "^0.1.9"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PeterHuazai/dsh-xiaofeiyu-memory.git"
+  },
+  "bugs": {
+    "url": "https://github.com/PeterHuazai/dsh-xiaofeiyu-memory/issues"
+  },
+  "homepage": "https://github.com/PeterHuazai/dsh-xiaofeiyu-memory#readme"
+}

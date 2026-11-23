@@ -1,0 +1,7 @@
+# DSH 插件挂载点：id 必须等于插件导出的命名空间名（index.js 的 export const name）
+- insert:
+    - id: xiaofeiyu-memory
+      name: dsh-xiaofeiyu-memory
+      config:
+        root: ''
+        defaultPartition: ''
