@@ -586,6 +586,26 @@ ok(typoLeak === 0, '报错之后库里没有多出垃圾分区', typoLeak);
 const wroteNew = engine.remember(store, { partition: 'p-brand-new', title: '写入自动建分区', body: '写入路径保留隐式创建' });
 ok(!!wroteNew.item, 'remember（写入）仍可自动建分区', wroteNew.item && wroteNew.item.title);
 
+// 41 脚手架（任务开启）+ 场景条目不再当知识：不进召回候选、不进主干、不进合并
+const pScaf = 'p-scaffold';
+engine.ensurePartition(store, { name: pScaf, title: '脚手架过滤' });
+const mTruth = engine.remember(store, { partition: pScaf, kind: 'decision', title: '守卫的硬阈值优先于加权分数', body: '上下文越线直接 block，不靠分数碰运气', importance: 4 });
+const mTask = engine.remember(store, { partition: pScaf, kind: 'task', title: '任务开启：脚手架测试', body: '', importance: 4 });
+const mScene = engine.remember(store, { partition: pScaf, kind: 'scene', title: '场景：脚手架测试收尾', body: '这一轮做了什么', importance: 4 });
+const rScaf = engine.recall(store, { partition: pScaf, query: '任务开启 脚手架 守卫', detail: 'index', topK: 10 });
+ok(rScaf.items.every(function (it) { return it.kind !== 'task'; }), 'recall 不再把「任务开启」当候选', rScaf.items.map(function (i) { return i.kind; }));
+ok(rScaf.items.some(function (it) { return it.id === mTruth.item.id; }), 'recall 仍然召回到真正的结论');
+const arch = engine.archiveTrunk(store, { partition: pScaf, title: '脚手架收尾', summary: '收尾一句话' });
+const trunkAfter = store.db.prepare("SELECT * FROM item WHERE partition_id = (SELECT id FROM partition WHERE name = ?) AND kind = 'trunk' ORDER BY updated_at DESC LIMIT 1").get(pScaf);
+ok(!/任务开启/.test(String(trunkAfter && trunkAfter.body)), '主干归档不收「任务开启」脚手架');
+ok(!/场景：/.test(String(trunkAfter && trunkAfter.body)), '主干归档不收「场景」条目（主干只放结论/决策/约束）');
+ok(/守卫的硬阈值/.test(String(trunkAfter && trunkAfter.body)), '主干归档仍然收真正的结论', trunkAfter && String(trunkAfter.body).slice(0, 80));
+const byName = function (t) { return store.db.prepare('SELECT id FROM partition WHERE name = ?').get(t).id; };
+const mergeDry = engine.mergeSimilar(store, { partitionId: byName(pScaf) });
+ok((mergeDry.groups || []).every(function (g) { return g.keeper && g.keeper.kind !== 'task'; }), '合并候选里没有脚手架条目', (mergeDry.groups || []).length);
+const scafFind = xfy.searchItems(store, { partition: pScaf, q: '任务开启' });
+ok(scafFind.items.some(function (it) { return it.kind === 'task'; }), '「任务开启」仍能用 search 翻到（只是不参与召回/主干/合并）', scafFind.items.length);
+
 console.log('\n通过 ' + pass + ' / 失败 ' + fail);
 if (fail) { console.log(failures.join('\n')); process.exit(1); }
 // Windows 上数据库句柄未关时删不掉临时目录

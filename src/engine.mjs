@@ -246,10 +246,13 @@ export function hydrate(row, cfg) {
   return o;
 }
 
+// 「任务开启：…」这类脚手架条目不算知识：不进召回候选、不进主干、不进合并（仍可用 search 翻到）
+const NOT_SCAFFOLD = " AND kind NOT IN ('task')";
+
 function candidateItems(store, partId, includeDormant, ids) {
   const base = includeDormant
-    ? "SELECT * FROM item WHERE partition_id = ? AND state NOT IN ('archived','deleted') AND superseded_by IS NULL"
-    : "SELECT * FROM item WHERE partition_id = ? AND state = 'active' AND superseded_by IS NULL AND deleted_at IS NULL";
+    ? "SELECT * FROM item WHERE partition_id = ? AND state NOT IN ('archived','deleted') AND superseded_by IS NULL" + NOT_SCAFFOLD
+    : "SELECT * FROM item WHERE partition_id = ? AND state = 'active' AND superseded_by IS NULL AND deleted_at IS NULL" + NOT_SCAFFOLD;
   if (ids && ids.length) {
     const list = ids.slice(0, 500);
     const holes = list.map(function () { return '?'; }).join(',');
@@ -261,8 +264,8 @@ function candidateItems(store, partId, includeDormant, ids) {
 // 没有当前模型向量的条目：绕过 ANN 直接进候选，避免新条目/换模型后条目被近似检索饿死
 function unindexedItems(store, partId, includeDormant, model) {
   const base = includeDormant
-    ? "SELECT * FROM item WHERE partition_id = ? AND state NOT IN ('archived','deleted') AND superseded_by IS NULL"
-    : "SELECT * FROM item WHERE partition_id = ? AND state = 'active' AND superseded_by IS NULL AND deleted_at IS NULL";
+    ? "SELECT * FROM item WHERE partition_id = ? AND state NOT IN ('archived','deleted') AND superseded_by IS NULL" + NOT_SCAFFOLD
+    : "SELECT * FROM item WHERE partition_id = ? AND state = 'active' AND superseded_by IS NULL AND deleted_at IS NULL" + NOT_SCAFFOLD;
   return store.db.prepare(base + ' AND id NOT IN (SELECT item_id FROM item_vector WHERE partition_id = ? AND model = ?)')
     .all(partId, partId, String(model || ''));
 }
@@ -271,8 +274,8 @@ function unindexedItems(store, partId, includeDormant, model) {
 function trunkItems(store, partId, includeDormant) {
   const minImp = Number((store.config.curve || {}).trunkImportance || 4);
   const base = includeDormant
-    ? "SELECT * FROM item WHERE partition_id = ? AND (pinned = 1 OR importance >= ?) AND state NOT IN ('archived','deleted') AND superseded_by IS NULL"
-    : "SELECT * FROM item WHERE partition_id = ? AND (pinned = 1 OR importance >= ?) AND state = 'active' AND superseded_by IS NULL AND deleted_at IS NULL";
+    ? "SELECT * FROM item WHERE partition_id = ? AND (pinned = 1 OR importance >= ?) AND state NOT IN ('archived','deleted') AND superseded_by IS NULL" + NOT_SCAFFOLD
+    : "SELECT * FROM item WHERE partition_id = ? AND (pinned = 1 OR importance >= ?) AND state = 'active' AND superseded_by IS NULL AND deleted_at IS NULL" + NOT_SCAFFOLD;
   return store.db.prepare(base).all(partId, minImp);
 }
 
@@ -823,7 +826,7 @@ export function trunkSnapshot(store, partitionId) {
   const c = curveCfg(cfg);
   const now = nowMs();
   const trunkMin = Number(c.trunkImportance || 4);
-  const sql = 'SELECT * FROM item WHERE deleted_at IS NULL AND state != ' + "'deleted'" + ' AND (pinned = 1 OR importance >= ?)' + (partitionId ? ' AND partition_id = ?' : '') + ' ORDER BY importance DESC, hit_count DESC, updated_at DESC';
+  const sql = 'SELECT * FROM item WHERE deleted_at IS NULL AND state != ' + "'deleted'" + ' AND (pinned = 1 OR importance >= ?)' + NOT_SCAFFOLD + (partitionId ? ' AND partition_id = ?' : '') + ' ORDER BY importance DESC, hit_count DESC, updated_at DESC';
   const stmt = store.db.prepare(sql);
   const rows = partitionId ? stmt.all(trunkMin, Number(partitionId)) : stmt.all(trunkMin);
   return rows.map(function (r) {
@@ -843,7 +846,7 @@ export function mergeSimilar(store, input) {
   const cfg = store.config;
   const threshold = Math.min(0.999, Math.max(0.3, Number(o.threshold || 0.6)));
   const maxGroups = Math.max(1, Number(o.maxGroups || 20));
-  const sql = 'SELECT * FROM item WHERE deleted_at IS NULL AND state = ' + "'active'" + (o.partitionId ? ' AND partition_id = ?' : '');
+  const sql = 'SELECT * FROM item WHERE deleted_at IS NULL AND state = ' + "'active'" + NOT_SCAFFOLD + (o.partitionId ? ' AND partition_id = ?' : '');
   const stmt = db.prepare(sql);
   const rows = o.partitionId ? stmt.all(Number(o.partitionId)) : stmt.all();
   const dims = Number((cfg.vector && cfg.vector.dims) || 256);
@@ -880,9 +883,9 @@ export function mergeSimilar(store, input) {
     const keeperIdx = cluster[0];
     const keeper = rows[keeperIdx];
     const members = cluster.slice(1).map(function (idx) {
-      return { id: rows[idx].id, title: rows[idx].title, score: Number(simOf(keeperIdx, idx).toFixed(4)) };
+      return { id: rows[idx].id, title: rows[idx].title, kind: rows[idx].kind, score: Number(simOf(keeperIdx, idx).toFixed(4)) };
     });
-    groups.push({ keeper: { id: keeper.id, title: keeper.title, partition_id: keeper.partition_id }, members: members });
+    groups.push({ keeper: { id: keeper.id, title: keeper.title, kind: keeper.kind, partition_id: keeper.partition_id }, members: members });
     if (groups.length >= maxGroups) break;
   }
   if (!o.apply) return { dryRun: true, threshold: threshold, candidates: rows.length, groups: groups, merged: 0 };
@@ -925,7 +928,7 @@ export function archiveTrunk(store, input) {
   const stamp = new Date(now).toISOString().slice(0, 16).replace('T', ' ');
   const lines = ['## ' + stamp + ' · ' + String(o.title || '会话收尾')];
   if (o.summary) lines.push(String(o.summary).trim());
-  const recent = db.prepare('SELECT id, title, body, kind, importance FROM item WHERE partition_id = ? AND deleted_at IS NULL AND state = ' + "'active'" + " AND kind NOT IN ('trunk','report') AND updated_at >= ?" + ' ORDER BY importance DESC, updated_at DESC LIMIT 8')
+  const recent = db.prepare('SELECT id, title, body, kind, importance FROM item WHERE partition_id = ? AND deleted_at IS NULL AND state = ' + "'active'" + " AND kind NOT IN ('trunk','report','task','scene') AND updated_at >= ?" + ' ORDER BY importance DESC, updated_at DESC LIMIT 8')
     .all(part.id, now - 2 * 86400000);
   for (const r of recent) {
     const snippet = String(r.body || '').replace(/\s+/g, ' ').slice(0, 120);

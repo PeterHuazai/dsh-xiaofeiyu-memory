@@ -378,4 +378,15 @@ mem fix --partition myproject --apply --step sweep,trunk,backup,cleanup,merge
 
 历史 bug：`recall` / `trunkDigest` / `planFix` / `checkGuard` 这类读入口内部调的是 `ensurePartition`，分区名打错（或者把分区 id 当名字传）会**静默建出一个空分区**，之后你会在 `mem partition list` 里看到 `1  1` 这种垃圾行。
 
+### 22.4 脚手架条目不算知识
+
+`mem task start` 会种一条「任务开启：…」（`kind='task'`、正文为空）的索引条目。它以前会：
+
+- 出现在 `recall` 候选里（占 token 预算、正文还是空的）；
+- 被守卫的「补主干」步骤折进主干正文；
+- 被 `mem merge` 当成可合并对象。
+
+现在这些条目**不进召回候选、不进主干归档、不进合并候选**（主干归档同时排除 `report` / `scene`：主干只放结论、决策、约束）。
+但条目本身还在库里，`mem search --partition <分区> "任务开启"` 依然翻得到，方便追溯这个任务开过没有。
+
 现在读操作走 `requirePartition`：分区不存在直接报 `unknown partition: xxx（先 mem partition add ...）`，不会建任何东西；只有真正的写入入口（`mem remember`、`mem task start`、`mem import`）保留「自动建分区」。工具层的 `xfy_memory_*` 走同样的严格规则。
