@@ -1,7 +1,7 @@
 import { nowMs, uid, hashOf } from './db.mjs';
 import * as vector from './vector.mjs';
 
-export const KINDS = ['fact', 'decision', 'constraint', 'preference', 'task', 'report', 'note', 'trunk'];
+export const KINDS = ['fact', 'decision', 'constraint', 'preference', 'task', 'report', 'note', 'trunk', 'scene'];
 
 function parseTags(raw) {
   if (Array.isArray(raw)) return raw.map(function (t) { return String(t).trim(); }).filter(Boolean);
@@ -76,6 +76,69 @@ export function isTrunk(item, cfg) {
   const c = curveCfg(cfg);
   if (!item) return false;
   return !!(item.pinned || Number(item.importance || 0) >= Number(c.trunkImportance || 4));
+}
+
+// ---- 三层记忆：主干 / 场景 / 细节 ----
+// 不新增列：用现有 kind + importance + pinned 推导，老库零迁移。主干永远有留存地板，场景是「一次任务的收束」，
+// 细节是平时记住的零散事实 —— 遗忘顺序是细节先掉、场景后掉、主干几乎不掉。
+export const LAYERS = ['trunk', 'scene', 'detail'];
+const SCENE_KINDS = { report: 1, scene: 1, task: 1, trunk: 1 };
+
+export function layerOf(item, cfg) {
+  if (!item) return 'detail';
+  const kind = String(item.kind || 'note');
+  if (kind === 'trunk') return 'trunk';
+  // 任务开启/汇报这类「一次任务的收束」默认算场景，除非被显式钉住 —— 它们是脚手架，不是结论
+  if (SCENE_KINDS[kind]) return item.pinned ? 'trunk' : 'scene';
+  if (item.pinned || Number(item.importance || 0) >= Number(curveCfg(cfg).trunkImportance || 4)) return 'trunk';
+  return 'detail';
+}
+
+export function estimateTokens(text, cfg) {
+  const ratio = Number((cfg && cfg.tokens && cfg.tokens.charsPerToken) || 1.7);
+  return Math.max(0, Math.round(String(text || '').length / ratio));
+}
+
+// 紧凑主干：给「第一轮自动注入」和面板用的纯文本，硬性按 token 预算截断（超了就从尾巴丢条目，不硬塞）
+export function trunkDigest(store, input) {
+  const o = input || {};
+  const part = ensurePartition(store, { name: o.partition, title: o.partitionTitle });
+  const cfg = store.config;
+  const mcfg = cfg.maintain || {};
+  const maxTokens = Math.max(80, Number(o.maxTokens || mcfg.digestTokens || 320));
+  const cap = Math.max(1, Number(o.maxItems || mcfg.maxDigestItems || 8));
+  const now = nowMs();
+  const rows = store.db.prepare("SELECT * FROM item WHERE partition_id = ? AND deleted_at IS NULL AND state != 'deleted' AND superseded_by IS NULL ORDER BY (pinned = 1) DESC, importance DESC, hit_count DESC, updated_at DESC").all(part.id);
+  const lines = [];
+  let spent = 0;
+  let truncated = false;
+  // 先主干、再场景；任务开启这类脚手架不进摘要，避免把「我开了一个任务」当成结论
+  const ordered = rows.filter(function (r) { return String(r.kind || '') !== 'task'; });
+  const rank = { trunk: 0, scene: 1, detail: 2 };
+  ordered.sort(function (a, b) {
+    const la = rank[layerOf(a, cfg)]; const lb = rank[layerOf(b, cfg)];
+    return la - lb || Number(b.importance || 0) - Number(a.importance || 0) || Number(b.hit_count || 0) - Number(a.hit_count || 0);
+  });
+  for (const r of ordered) {
+    if (lines.length >= cap) { truncated = true; break; }
+    const layer = layerOf(r, cfg);
+    if (layer === 'detail') { truncated = true; break; }
+    const head = (layer === 'trunk' ? '★ ' : '· ') + String(r.title || '').slice(0, 70);
+    const cost = estimateTokens(head, cfg) + 1;
+    if (spent + cost > maxTokens) { truncated = true; break; }
+    spent += cost;
+    lines.push(head);
+  }
+  const body = lines.join('\n');
+  return {
+    partition: part.name,
+    text: body,
+    items: lines.length,
+    tokens: estimateTokens(body, cfg),
+    budget: maxTokens,
+    truncated: truncated,
+    layerCounts: rows.reduce(function (acc, r) { const l = layerOf(r, cfg); acc[l] = (acc[l] || 0) + 1; return acc; }, { trunk: 0, scene: 0, detail: 0 })
+  };
 }
 
 // 主干强化系数：每次成功调用/手工 reinforce 乘一把，随时间缓慢衰减回 1（不会一下归零）
@@ -159,10 +222,11 @@ export function remember(store, input) {
   return { item: fresh, deduped: false };
 }
 
-export function hydrate(row) {
+export function hydrate(row, cfg) {
   const o = Object.assign({}, row);
   o.tags = jsonParse(row.tags, []);
   o.pinned = !!row.pinned;
+  o.layer = layerOf(row, cfg);
   return o;
 }
 
@@ -312,24 +376,47 @@ export function recall(store, input) {
   let redundantCount = 0;
   const detail = String(input.detail || cfg.recall.detail || 'index');
   const bodyLimit = Number(cfg.recall.indexBodyChars || 90);
-  const out = chosen.map(function (x) {
+  // token 预算：超了先降 detail（full→index），再超就丢分数最低的尾部条目，绝不把整批硬塞进上下文
+  const budget = Math.max(0, Number(input.budget === undefined ? (cfg.recall.budgetTokens || 1200) : input.budget));
+  const out = [];
+  let totalTokens = 0;
+  let budgetDropped = 0;
+  let budgetDowngraded = 0;
+  for (const x of chosen) {
     const seen = repeat.get(x.item.id) || 0;
     const redundant = seen >= Number(cfg.recall.maxRepeatReads || 3);
-    if (redundant) redundantCount += 1;
-    const useFull = detail === 'full' || (detail === 'auto' && !redundant);
     const rawBody = redundant ? '' : String(x.item.body || '');
-    const body = useFull ? rawBody : rawBody.slice(0, bodyLimit) + (rawBody.length > bodyLimit ? '…' : '');
-    return {
+    const indexBody = rawBody.slice(0, bodyLimit) + (rawBody.length > bodyLimit ? '…' : '');
+    let useFull = detail === 'full' || (detail === 'auto' && !redundant);
+    let body = useFull ? rawBody : indexBody;
+    let tokens = estimateTokens(String(x.item.title || '') + body, cfg);
+    if (budget > 0 && totalTokens + tokens > budget) {
+      const idxTokens = estimateTokens(String(x.item.title || '') + indexBody, cfg);
+      if (useFull && totalTokens + idxTokens <= budget) {
+        useFull = false;
+        body = indexBody;
+        tokens = idxTokens;
+        budgetDowngraded += 1;
+      } else {
+        budgetDropped += 1;
+        continue;
+      }
+    }
+    if (redundant) redundantCount += 1;
+    totalTokens += tokens;
+    out.push({
       id: x.item.id,
       title: x.item.title,
       body: body,
       bodyTruncated: !useFull && rawBody.length > bodyLimit,
       detail: useFull ? 'full' : 'index',
       kind: x.item.kind,
+      layer: layerOf(x.item, cfg),
       tags: jsonParse(x.item.tags, []),
       importance: x.item.importance,
       pinned: !!x.item.pinned,
       state: x.item.state,
+      tokens: tokens,
       score: Number(x.score.toFixed(4)),
       relevance: Number(x.relevance.toFixed(4)),
       cos: Number(Number(x.cos || 0).toFixed(4)),
@@ -338,8 +425,8 @@ export function recall(store, input) {
       redundant: redundant,
       repeatReads: seen,
       captions: String(x.item.caption_text || '').slice(0, 200)
-    };
-  });
+    });
+  }
 
   const eventId = uid('r');
   const latency = nowMs() - started;
@@ -365,6 +452,11 @@ export function recall(store, input) {
     query: query,
     detail: detail,
     items: out,
+    totalTokens: totalTokens,
+    budgetTokens: budget,
+    budgetDropped: budgetDropped,
+    budgetDowngraded: budgetDowngraded,
+    layer: 'index',
     tookMs: latency,
     redundant: redundantCount,
     candidates: items.length,
@@ -683,7 +775,7 @@ export function itemList(store, partId, opts) {
   const rows = store.db.prepare('SELECT * FROM item WHERE partition_id = ? AND state != ' + "'deleted'" + ' AND (? = 1 OR state != ' + "'archived'" + ') ORDER BY pinned DESC, importance DESC, updated_at DESC LIMIT ?')
     .all(partId, o.includeArchived ? 1 : 0, Number(o.limit || 500));
   return rows.map(function (r) {
-    const h = hydrate(r);
+    const h = hydrate(r, store.config);
     h.retention = Number(retentionOf(r, now, store.config).toFixed(4));
     return h;
   });
@@ -839,6 +931,50 @@ export function archiveTrunk(store, input) {
   }
   const boost = reinforce(store, { id: itemId, strength: Number(o.strength || store.config.curve.trunkBoostGrowth || 1.35), reason: 'task-archive' });
   return { partition: part.name, itemId: itemId, created: created, consolidated: recent.length, boost: boost.after };
+}
+
+// ---- 任务收尾的分层压缩：主干追加一节 + 一条「场景」收束（同一 task 幂等），细节条目原样留库 ----
+export function consolidate(store, input) {
+  const o = input || {};
+  const db = store.db;
+  const part = ensurePartition(store, { name: o.partition, title: o.partitionTitle });
+  const now = nowMs();
+  const title = String(o.title || '会话收尾').slice(0, 80);
+  const out = { partition: part.name, trunk: null, scene: null, layers: null };
+  try {
+    out.trunk = archiveTrunk(store, { partition: part.name, title: title, summary: o.summary, strength: o.strength });
+  } catch (err) {
+    out.trunk = { error: String((err && err.message) || err) };
+  }
+  if (o.scene !== false) {
+    const tag = o.taskId ? 'task:' + String(o.taskId) : '';
+    let existing = null;
+    if (tag) {
+      existing = db.prepare("SELECT * FROM item WHERE partition_id = ? AND kind = 'scene' AND deleted_at IS NULL AND tags LIKE ? ORDER BY updated_at DESC LIMIT 1")
+        .get(part.id, '%' + tag + '%') || null;
+    }
+    const memoryIds = Array.isArray(o.itemIds) ? o.itemIds.slice(0, 12) : [];
+    const lines = [String(o.summary || '').trim()].filter(Boolean);
+    if (memoryIds.length) lines.push('关键条目：' + memoryIds.join('、'));
+    if (o.reportPath) lines.push('汇报：' + String(o.reportPath));
+    const body = lines.join('\n').slice(0, 4000);
+    if (body) {
+      if (existing) {
+        db.prepare('UPDATE item SET body = ?, updated_at = ?, importance = MAX(importance, 3) WHERE id = ?').run(body, now, existing.id);
+        store.shadow.append('item', db.prepare('SELECT * FROM item WHERE id = ?').get(existing.id));
+        out.scene = { id: existing.id, created: false, tokens: estimateTokens(body, store.config) };
+      } else {
+        const res = remember(store, {
+          partition: part.name, kind: 'scene', title: '场景：' + title, body: body,
+          importance: 3, pinned: false, tags: ['scene'].concat(tag ? [tag] : []), source: 'consolidate'
+        });
+        out.scene = { id: res.item.id, created: true, tokens: estimateTokens(body, store.config) };
+      }
+    }
+  }
+  const rows = db.prepare("SELECT kind, pinned, importance FROM item WHERE partition_id = ? AND deleted_at IS NULL AND state != 'deleted'").all(part.id);
+  out.layers = rows.reduce(function (acc, r) { const l = layerOf(r, store.config); acc[l] += 1; return acc; }, { trunk: 0, scene: 0, detail: 0 });
+  return out;
 }
 
 // ---- 检索评测：用条目自己的标题当查询，比较不同权重下的命中率与 token 成本 ----

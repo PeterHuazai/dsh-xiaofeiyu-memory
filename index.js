@@ -11,6 +11,7 @@ import { appendFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { randomUUID } from 'node:crypto'
 
 const hostDeps = await loadHostDeps()
 const z = hostDeps.z
@@ -27,7 +28,9 @@ export const Config = !z ? undefined : z.object({
   /** 不给 partition 时用哪个分区（建议显式传，别依赖这个） */
   defaultPartition: z.string().default('').extra('volatile', true),
   /** 回合结束自动清扫休眠/归档（写操作，默认关） */
-  autoSweep: z.boolean().default(false).extra('volatile', true)
+  autoSweep: z.boolean().default(false).extra('volatile', true),
+  /** 每个会话第一轮自动注入一段主干摘要（省 token：只给主干+场景，不给细节） */
+  injectTrunk: z.boolean().default(true).extra('volatile', true)
 })
 
 const cache = { root: '', store: null, api: null }
@@ -106,7 +109,7 @@ export function apply(ctx, config) {
 
   tool({
     name: 'xfy_memory_recall',
-    description: '从某个分区的长期记忆里召回这次任务最该看的几条（词面 + 多维向量融合 + 遗忘曲线衰减 + 重要度加权）。返回 eventId，用完后必须回调 xfy_memory_feedback 回填是否用上 —— 命中率和遗忘曲线全靠这个信号。默认 detail=index 只给正文前 90 字，省 token。',
+    description: '从某个分区的长期记忆里召回这次任务最该看的几条（词面 + 多维向量融合 + 遗忘曲线衰减 + 重要度加权）。返回 eventId，用完后必须回调 xfy_memory_feedback 回填是否用上 —— 命中率和遗忘曲线全靠这个信号。默认 detail=index 只给正文前 90 字，省 token；带 token 预算（默认 1200，超出自动先降级成索引再丢弃，返回 totalTokens / budgetDropped 说明花了多少）。',
     parameters: {
       type: 'object',
       properties: {
@@ -114,6 +117,7 @@ export function apply(ctx, config) {
         query: { type: 'string', description: '关键词，空格分隔；项目符号不要' },
         limit: { type: 'number', description: '最多几条，默认取配置里的 topK' },
         detail: { type: 'string', enum: ['index', 'full'], description: 'index 截断正文省 token；full 给全文' },
+        budget: { type: 'number', description: 'token 预算硬上限，默认 1200；超了会自动降级/丢弃' },
         includeDormant: { type: 'boolean', description: '是否包含已休眠条目' }
       },
       additionalProperties: false,
@@ -124,13 +128,37 @@ export function apply(ctx, config) {
       const partition = partOf(args, config)
       const r = api.engine.recall(api.store, {
         partition: partition, query: String(args.query || ''), limit: args.limit,
-        detail: args.detail || 'index', includeDormant: !!args.includeDormant
+        detail: args.detail || 'index', includeDormant: !!args.includeDormant, budget: args.budget
       })
       return {
         partition: partition, eventId: r.eventId, candidates: r.candidates, tookMs: r.tookMs,
+        totalTokens: r.totalTokens, budgetTokens: r.budgetTokens, budgetDropped: r.budgetDropped, budgetDowngraded: r.budgetDowngraded,
+        layers: r.items.map(function (it) { return it.layer; }).reduce(function (acc, k) { acc[k] = (acc[k] || 0) + 1; return acc; }, {}),
         items: r.items.map(slimItem),
         next: '看完请回填：xfy_memory_feedback({ eventId: ' + r.eventId + ', used: true|false })'
       }
+    }
+  })
+
+  tool({
+    name: 'xfy_memory_trunk',
+    description: '读这个分区的「主干摘要」：把主干层（★）与场景层（·）按 token 预算压成一小段文字，外加三层各多少条、这次摘要花多少 token。开新话题、上下文快满、或者只想记得「大方向」不想翻细节时用这个，比 recall 更省。',
+    parameters: {
+      type: 'object',
+      properties: {
+        partition: { type: 'string' },
+        maxTokens: { type: 'number', description: '摘要 token 上限，默认取 maintain.digestTokens(320)' },
+        maxItems: { type: 'number', description: '最多几条，默认 8' }
+      },
+      additionalProperties: false,
+      required: ['partition']
+    },
+    async execute(args) {
+      const api = await load(config)
+      const r = api.engine.trunkDigest(api.store, {
+        partition: partOf(args, config), maxTokens: args.maxTokens, maxItems: args.maxItems
+      })
+      return r
     }
   })
 
@@ -143,7 +171,7 @@ export function apply(ctx, config) {
         partition: { type: 'string' },
         title: { type: 'string', description: '一句话结论，别超过 40 字' },
         body: { type: 'string', description: '正文：为什么、边界、怎么验证' },
-        kind: { type: 'string', enum: ['fact', 'decision', 'constraint', 'preference', 'task', 'report', 'note', 'trunk'] },
+        kind: { type: 'string', enum: ['fact', 'decision', 'constraint', 'preference', 'task', 'report', 'note', 'trunk', 'scene'], description: 'trunk=主干（永不掉留存地板）；scene=一次任务的场景收束；其余为普通结论' },
         importance: { type: 'number', description: '1-5，4 以上基本不会休眠' },
         pinned: { type: 'boolean', description: '钉住 = 永远不进休眠，主干用' },
         tags: { type: 'string', description: '逗号分隔' },
@@ -211,23 +239,40 @@ export function apply(ctx, config) {
 
   tool({
     name: 'xfy_memory_guard',
-    description: '三重保险里的第二重：上下文压力 / 命中率 / 重复读取 / 陈旧占比四项打分，返回 ok | warn | block 与处置指令。context 超过 warn 线就 warn，超过 block 线直接 block（此时别再翻文件，只按 trunk 主干作答）。',
+    description: '三重保险里的第二重：上下文压力 / 命中率 / 重复读取 / 陈旧占比四项打分，返回 ok | warn | block 与处置指令。context 超过 warn 线就 warn，超过 block 线直接 block（此时别再翻文件，只按 trunk 主干作答）。两种「修复」模式：plan=true 只给可执行计划（每步带 safe/reversible/count/preview，不动任何东西）；apply=true + confirm=true 才真执行（不带 confirm 一律拒绝并回计划）。不传这两个参数就只做打分。',
     parameters: {
       type: 'object',
       properties: {
         partition: { type: 'string' },
         tokens: { type: 'number', description: '估计当前上下文 token 数' },
         chars: { type: 'number', description: '或者给字符数，按 charsPerToken 折算' },
-        taskId: { type: 'string' }
+        taskId: { type: 'string' },
+        plan: { type: 'boolean', description: '只出修复计划（安全，不动数据）' },
+        apply: { type: 'boolean', description: '执行修复；必须同时给 confirm=true' },
+        confirm: { type: 'boolean', description: '用户已确认（会话里明确同意后才给 true）' },
+        steps: { type: 'string', description: '要执行的步骤 id，逗号分隔：sweep,trunk,backup,cleanup,merge；不给=全部 safe 步骤' },
+        cleanupDays: { type: 'number', description: 'cleanup 保留天数，默认 30' }
       },
       additionalProperties: false,
       required: ['partition']
     },
     async execute(args) {
       const api = await load(config)
-      return api.guard.checkGuard(api.store, {
-        partition: partOf(args, config), contextTokens: args.tokens, chars: args.chars, taskId: args.taskId
+      const partition = partOf(args, config)
+      const fixArgs = {
+        partition: partition, cleanupDays: args.cleanupDays,
+        steps: args.steps ? String(args.steps).split(',').map(function (s) { return s.trim(); }).filter(Boolean) : undefined,
+        confirm: args.confirm === true
+      }
+      if (args.apply === true) {
+        const r = api.guard.applyFix(api.store, fixArgs)
+        return r
+      }
+      if (args.plan === true) return api.guard.planFix(api.store, fixArgs)
+      const r = api.guard.checkGuard(api.store, {
+        partition: partition, contextTokens: args.tokens, chars: args.chars, taskId: args.taskId
       })
+      return r
     }
   })
 
@@ -349,7 +394,7 @@ export function apply(ctx, config) {
 
   tool({
     name: 'xfy_memory_task',
-    description: '任务闸门：action=start 建会话记录并返回主干记忆（先读 trunk 再动手）；action=end 收尾，必须带 summary，可带 markdown 汇报，会落一份汇报文档到 data/reports 并登记进库。没有汇报文档不算任务结束。',
+    description: '任务闸门：action=start 建会话记录并返回主干记忆（先读 trunk 再动手）；action=end 收尾，必须带 summary，可带 markdown 汇报，会落一份汇报文档到 data/reports 并登记进库，并自动做一次分层收束（结论并进主干 + 本次任务落一条「场景」记忆）。没有汇报文档不算任务结束。',
     parameters: {
       type: 'object',
       properties: {
@@ -359,6 +404,7 @@ export function apply(ctx, config) {
         taskId: { type: 'string', description: 'end 必填' },
         summary: { type: 'string', description: 'end：一句话结果' },
         markdown: { type: 'string', description: 'end：完整汇报正文（做了什么/结论/遗留）' },
+        scene: { type: 'string', description: 'end：这次场景的一句话（不给就用 summary）' },
         tokens: { type: 'number', description: '当前上下文 token 数' }
       },
       additionalProperties: false,
@@ -373,7 +419,7 @@ export function apply(ctx, config) {
         return r
       }
       const r = api.tasks.endTask(api.store, {
-        id: String(args.taskId || ''), summary: args.summary, markdown: args.markdown,
+        id: String(args.taskId || ''), summary: args.summary, markdown: args.markdown, scene: args.scene,
         partition: args.partition || null, contextTokens: args.tokens
       })
       return r
@@ -473,6 +519,28 @@ export function apply(ctx, config) {
       return undefined
     }
     const offs = []
+    /**
+     * 需要「看到 decision 才能动手」的中间件用这个：先 await next() 拿到 decision，
+     * 再把 decision 原样返回（少了这一步就是上一版每轮秒挂的根因）。
+     * fn 里抛什么都只记不抛 —— 记忆库坏了不能拖垮对话。
+     */
+    const onWaterfall = (name, fn) => {
+      try {
+        const off = ctx.on(name, function (payload, next) {
+          const done = typeof next === 'function' ? next : function () { return undefined }
+          const safeRun = async function (decision) {
+            try { await fn(payload || {}, decision) } catch (err) {}
+            return decision
+          }
+          let pending
+          try { pending = done() } catch (err) { throw err }
+          if (pending && typeof pending.then === 'function') return pending.then(safeRun)
+          return safeRun(pending)
+        })
+        if (typeof off === 'function') return off
+      } catch (err) {}
+      return undefined
+    }
     const partitionOf = (payload) => String(cfgGet(payload && payload.partition, '') || cfgGet(config && config.defaultPartition, '') || '').trim()
 
     // payload 里没有 token 计数时，按消息正文估算一个（CJK 约 1 字 1 token，拉丁约 4 字符 1 token）。
@@ -512,6 +580,39 @@ export function apply(ctx, config) {
       }
     })
     if (preStep) offs.push(preStep)
+
+    /**
+     * 与 DSH 交融的正面用法：不抢 system prompt，也不改任何已有消息，
+     * 只在「每个会话的第一轮第一步」往 decision.messages 末尾补一条带 source 的记忆快照。
+     * 为什么只第一轮：pre-step 每步都会跑，每步都塞就是纯烧 token；主干本来就该只铺一次。
+     */
+    const trunkInjected = new Set()
+    const injectTrunk = onWaterfall('agent/pre-step', async (payload, decision) => {
+      if (!decision || decision.kind !== 'enter') return
+      if (!Array.isArray(decision.messages) || !decision.messages.length) return
+      if (Number(payload.turn) !== 1 || Number(payload.step) !== 1) return
+      if (cfgGet(config && config.injectTrunk, true) === false) return
+      const part = partitionOf(payload)
+      if (!part) return
+      let key = part
+      try {
+        const agent = ctx.agents && typeof ctx.agents.requireInitiator === 'function' ? ctx.agents.requireInitiator() : null
+        if (agent && agent.id) key = part + ':' + agent.id
+      } catch (err) {}
+      if (trunkInjected.has(key)) return
+      const api = await load(config)
+      const digest = api.engine.trunkDigest(api.store, { partition: part })
+      if (!digest || !digest.items) return
+      trunkInjected.add(key)
+      const text = '[小肥鱼记忆 · 主干速览]\n分区 ' + part + ' 的主干摘要（' + digest.items + ' 条 / 约 ' + digest.tokens + ' tokens，只在第一轮给一次）：\n' + digest.text + '\n\n需要细节或某个场景用 xfy_memory_recall；要写结论用 xfy_memory_remember；收尾用 xfy_memory_task(end)。'
+      decision.messages.push({
+        id: randomUUID(),
+        role: 'user',
+        content: [{ type: 'text', text }],
+        source: { kind: 'xiaofeiyu-memory', form: 'snapshot', sections: [{ name: 'xfy-memory', text }] }
+      })
+    })
+    if (injectTrunk) offs.push(injectTrunk)
 
     // 回合结束：可选自动清扫（默认关，写操作要用户点头才开）
     const turnStop = on('agent/turn-stopping', async (payload) => {

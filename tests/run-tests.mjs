@@ -514,6 +514,60 @@ const site = tasks.exportSite(store, { partition: 'p-adaptive', dir: path.join(T
 ok(fs.existsSync(path.join(site.dir, 'index.html')) && site.files.length >= 2, '静态站点导出 index.html + 分区 md', site.files);
 const siteHtml = fs.readFileSync(path.join(site.dir, 'index.html'), 'utf8');
 ok(siteHtml.indexOf('<table>') >= 0 && siteHtml.indexOf('p-adaptive') >= 0, '站点 html 含分区与条目表');
+
+// 38 v0.2 三层记忆：layerOf / trunkDigest / token 预算 / consolidate
+const lp = engine.ensurePartition(store, { name: 'p-v02', title: 'v0.2 测试' });
+const lTrunk = engine.remember(store, { partition: 'p-v02', title: '主干结论', body: '这个项目的主干结论', kind: 'trunk' });
+const lScene = engine.remember(store, { partition: 'p-v02', title: '汇报：一次收尾', body: '这次做了什么', kind: 'report' });
+const lTask = engine.remember(store, { partition: 'p-v02', title: '任务开启：写代码', body: '任务脚手架', kind: 'task' });
+const lPin = engine.remember(store, { partition: 'p-v02', title: '钉住的小事', body: '虽然不重要但钉住了', importance: 2, pinned: true });
+const lHi = engine.remember(store, { partition: 'p-v02', title: '高重要度', body: '重要度 5', importance: 5 });
+const lDetail = engine.remember(store, { partition: 'p-v02', title: '琐碎细节', body: '一个细节', importance: 2 });
+function layerByTitle(t) {
+  const row = store.db.prepare("SELECT * FROM item WHERE partition_id = ? AND title = ?").get(lp.id, t);
+  return engine.layerOf(row, store.config);
+}
+eq(layerByTitle('主干结论'), 'trunk', 'kind=trunk 归到主干层');
+eq(layerByTitle('汇报：一次收尾'), 'scene', '汇报归到场景层');
+eq(layerByTitle('任务开启：写代码'), 'scene', '任务脚手架归到场景层而不是主干');
+eq(layerByTitle('钉住的小事'), 'trunk', 'pinned 归到主干层');
+eq(layerByTitle('高重要度'), 'trunk', 'importance>=trunkImportance 归到主干层');
+eq(layerByTitle('琐碎细节'), 'detail', '普通条目归到细节层');
+const digest = engine.trunkDigest(store, { partition: 'p-v02', maxTokens: 400 });
+ok(digest.text.indexOf('主干结论') >= 0, '主干摘要含主干条目', digest.text.slice(0, 60));
+ok(digest.text.indexOf('任务开启：写代码') < 0, '主干摘要不掺任务脚手架（噪声）');
+ok(digest.tokens > 0 && digest.tokens <= digest.budget, '摘要按 token 预算收口', { tokens: digest.tokens, budget: digest.budget });
+ok(digest.layerCounts.trunk >= 3 && digest.layerCounts.detail >= 1, '摘要回报三层计数', digest.layerCounts);
+const tight = engine.trunkDigest(store, { partition: 'p-v02', maxTokens: 80 });
+ok(tight.tokens <= 80, '小预算下摘要不超标', tight);
+const longOne = engine.remember(store, { partition: 'p-v02', title: '长正文条目甲', body: '这是一段用来撑爆预算的长正文。'.repeat(20), importance: 4 });
+const longTwo = engine.remember(store, { partition: 'p-v02', title: '长正文条目乙', body: '另一段同样很长的正文内容。'.repeat(20), importance: 4 });
+const budgetRecall = engine.recall(store, { partition: 'p-v02', query: '长正文 条目 结论 细节 重要度', detail: 'full', limit: 8, budget: 20 });
+ok(budgetRecall.totalTokens <= 20, 'recall 硬预算生效', { total: budgetRecall.totalTokens, budget: budgetRecall.budgetTokens });
+ok(budgetRecall.budgetDropped > 0, '超预算的条目被丢弃而不是硬塞', { dropped: budgetRecall.budgetDropped, downgraded: budgetRecall.budgetDowngraded, items: budgetRecall.items.length });
+ok(budgetRecall.items.every(function (it) { return typeof it.layer === 'string' && typeof it.tokens === 'number'; }), '召回结果带回 layer 与 tokens');
+const cons = engine.consolidate(store, { partition: 'p-v02', title: 'v0.2 收尾', summary: '做完了三层与预算', taskId: 't-fake-v02' });
+ok(cons.trunk.consolidated >= 1, 'consolidate 把结论并进主干', cons.trunk);
+const sceneRows = store.db.prepare("SELECT * FROM item WHERE partition_id = ? AND kind = 'scene'").all(lp.id);
+ok(sceneRows.length === 1 && String(sceneRows[0].title).indexOf('场景：v0.2 收尾') === 0, 'consolidate 写了一条场景记忆', { rows: sceneRows.length, kind: sceneRows[0] && sceneRows[0].kind });
+ok(engine.layerOf(sceneRows[0], store.config) === 'scene', '场景记忆在分层里算场景层');
+engine.consolidate(store, { partition: 'p-v02', title: 'v0.2 收尾', summary: '又收一次', taskId: 't-fake-v02' });
+const sceneAgain = store.db.prepare("SELECT * FROM item WHERE partition_id = ? AND kind = 'scene'").all(lp.id);
+ok(sceneAgain.length === 1, '同一 taskId 的 consolidate 幂等（不重复写场景）', sceneAgain.length);
+
+// 39 v0.2 守卫一键修复：planFix / applyFix 的两段确认
+const fixPlan = guard.planFix(store, { partition: 'p-v02' });
+ok(Array.isArray(fixPlan.steps) && fixPlan.steps.length === 5, '一键修复给五个步骤', fixPlan.steps && fixPlan.steps.map(function (s) { return s.id; }));
+ok(fixPlan.requiresConfirm === true, '计划声明需要确认');
+ok(fixPlan.steps.filter(function (s) { return s.safe; }).length === 4, '安全步骤 4 个（merge 不算）');
+ok(fixPlan.trunk && typeof fixPlan.trunk.text === 'string', '计划里带主干摘要预览');
+const denied = guard.applyFix(store, { partition: 'p-v02', steps: ['backup'] });
+ok(denied.ok === false && denied.requiresConfirm === true, '不带 confirm 一律拒绝执行', denied);
+const applied = guard.applyFix(store, { partition: 'p-v02', steps: ['backup'], confirm: true });
+ok(applied.ok === true && applied.applied.length === 1 && applied.applied[0] === 'backup' && applied.results[0].ok === true, '带 confirm 且指定 steps 只执行指定步骤', applied.results);
+const merged = guard.applyFix(store, { partition: 'p-v02', steps: ['merge'], confirm: true });
+ok(merged.ok === true && merged.results[0].id === 'merge', 'merge 只有显式指定才跑（永不默认）', merged.results);
+
 console.log('\n通过 ' + pass + ' / 失败 ' + fail);
 if (fail) { console.log(failures.join('\n')); process.exit(1); }
 // Windows 上数据库句柄未关时删不掉临时目录

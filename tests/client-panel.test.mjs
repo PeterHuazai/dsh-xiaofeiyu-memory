@@ -213,6 +213,18 @@ const FIX = {
     guards: 2, tasks: 1, reports: 1,
     nearForget: [{ id: 'it-3' }], cooling: [{ id: 'it-2' }], hottest: [], daily: []
   },
+  guardFix: {
+    partition: 'p1', generatedAt: NOW, level: 'warn', codes: ['STALE_ITEMS', 'NO_TRUNK'],
+    requiresConfirm: true, confirmHint: '加 confirm=true 才执行',
+    steps: [
+      { id: 'sweep', title: '休眠/归档低留存条目', safe: true, reversible: true, detail: '按遗忘曲线降级', count: 3, preview: [{ id: 'it-3', title: '旧结论', retention: 0.11 }] },
+      { id: 'trunk', title: '补一条主干草稿', safe: true, reversible: true, detail: '按高重要度条目拼', count: 8, preview: ['主干记忆一'] },
+      { id: 'backup', title: '立刻备份数据库', safe: true, reversible: false, detail: '生成 .db 快照', count: 1, preview: [] },
+      { id: 'cleanup', title: '清理统计窗口', safe: true, reversible: false, detail: '只删超期统计', count: 12, preview: [] },
+      { id: 'merge', title: '合并近似条目', safe: false, reversible: true, detail: '被并条目归档', count: 2, preview: ['记忆条目 1 ← 1 条'] }
+    ],
+    trunk: { items: 6, tokens: 102, budget: 320, text: '★ 主干记忆一\n· 场景：插件收尾' }
+  },
   guard: {
     events: [
       { id: 11, partition_id: 'p1', ts: NOW - 1000, level: 'warn', score: 0.61, reasons: ['命中率低于地板', '陈旧占比 0.52'], context_tokens: 130000, action: 'warn', source: 'simulated', deleted: 0 },
@@ -302,6 +314,19 @@ try {
   overviewMarkup = ReactDOMServer.renderToStaticMarkup(React.createElement(bundle.MemoryPanel, { previewBoot: FIX, previewPartition: 'p1', previewPane: 'overview' }));
 } catch (e) { /* 上面已记失败 */ }
 for (const word of ['分区', '守卫', '评测']) ok(overviewMarkup.indexOf(word) >= 0, '概览输出含「' + word + '」');
+
+// 守卫板块的「一键修复」卡片：计划步骤全部渲染出来，且默认只勾安全步骤
+let guardMarkup = '';
+try {
+  guardMarkup = ReactDOMServer.renderToStaticMarkup(React.createElement(bundle.MemoryPanel, { previewBoot: FIX, previewPartition: 'p1', previewPane: 'guard' }));
+} catch (e) { ok(false, '守卫板块渲染抛错', String(e)); }
+ok(guardMarkup.indexOf('一键修复') >= 0, '守卫板块含「一键修复」卡片');
+ok(guardMarkup.indexOf('主干摘要') >= 0 && guardMarkup.indexOf('102') >= 0, '一键修复卡显示主干摘要与 token 成本');
+for (const t of ['休眠/归档低留存条目', '补一条主干草稿', '立刻备份数据库', '清理统计窗口', '合并近似条目']) {
+  ok(guardMarkup.indexOf(t) >= 0, '计划里有步骤「' + t + '」');
+}
+ok(guardMarkup.indexOf('执行选中') >= 0, '有「执行选中」按钮（带二次确认）');
+ok(guardMarkup.indexOf('★ 主干') >= 0 || guardMarkup.indexOf('层') >= 0, '条目表格带层级列');
 
 // Ctrl+K 检索浮层（预览可直达，SSR 下不应抛错）
 let overlayMarkup = '';

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { nowMs, uid, atomicWrite, deepMerge, saveConfig, listBackups } from './db.mjs';
-import { ensurePartition, remember, partitionByName, clamp, archiveTrunk, sweep, trunkSnapshot, retentionOf, mergeSimilar, itemList, listPartitions, hitStats } from './engine.mjs';
+import { ensurePartition, remember, partitionByName, clamp, archiveTrunk, sweep, trunkSnapshot, retentionOf, mergeSimilar, itemList, listPartitions, hitStats, consolidate } from './engine.mjs';
 import { audit } from './guard.mjs';
 
 function slug(text) {
@@ -125,7 +125,7 @@ export function endTask(store, input) {
   const wasOpen = row.status !== 'done' && row.status !== 'aborted';
   const now = nowMs();
   db.prepare('UPDATE task SET status = ?, ended_at = ?, summary = ?, context_tokens = ? WHERE id = ?')
-    .run(o.abort ? 'aborted' : 'done', now, String(o.summary || row.summary || ''), Number(o.tokens || row.context_tokens || 0), row.id);
+    .run(o.abort ? 'aborted' : 'done', now, String(o.summary || row.summary || ''), Number(o.tokens || o.contextTokens || row.context_tokens || 0), row.id);
   const next = db.prepare('SELECT * FROM task WHERE id = ?').get(row.id);
   store.shadow.append('task', next);
   let report = null;
@@ -141,14 +141,23 @@ export function endTask(store, input) {
   }
   let trunk = null;
   let swept = null;
+  let consolidated = null;
   if (o.archive !== false && wasOpen) {
     const part = partitionById(store, row.partition_id);
     try {
-      trunk = archiveTrunk(store, { partition: part ? part.name : '', taskId: row.id, title: o.title || row.title, summary: o.summary || row.summary });
-    } catch (err) { trunk = { error: String((err && err.message) || err) }; }
+      // 收尾即分层落库：结论并进主干 + 本次任务落一条「场景」记忆（同一 taskId 幂等）
+      consolidated = consolidate(store, {
+        partition: part ? part.name : '', taskId: row.id, title: o.title || row.title,
+        summary: o.summary || row.summary, reportPath: report && report.path, scene: o.scene, strength: o.strength
+      });
+      trunk = consolidated.trunk;
+    } catch (err) {
+      trunk = { error: String((err && err.message) || err) };
+      try { trunk = archiveTrunk(store, { partition: part ? part.name : '', taskId: row.id, title: o.title || row.title, summary: o.summary || row.summary }); } catch (err2) { trunk = { error: String((err2 && err2.message) || err2) }; }
+    }
     try { swept = sweep(store, { partitionId: row.partition_id }); } catch (err) { swept = { error: String((err && err.message) || err) }; }
   }
-  return { task: next, report: report, trunk: trunk, swept: swept };
+  return { task: next, report: report, trunk: trunk, consolidated: consolidated, layers: consolidated ? consolidated.layers : null, swept: swept };
 }
 
 export function partitionById(store, id) {

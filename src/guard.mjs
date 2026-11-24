@@ -1,5 +1,5 @@
-import { nowMs, uid } from './db.mjs';
-import { ensurePartition, retentionOf, clamp, hydrate } from './engine.mjs';
+import { nowMs, uid, backup } from './db.mjs';
+import { ensurePartition, retentionOf, clamp, hydrate, sweep, archiveTrunk, mergeSimilar, trunkDigest } from './engine.mjs';
 
 function jsonParse(text, fallback) { try { return JSON.parse(text); } catch (err) { return fallback; } }
 
@@ -270,6 +270,96 @@ export function audit(store, input) {
   const lastBackup = backupAge(store);
   if (lastBackup.days > 3) findings.push({ severity: 'warn', partition: '*', code: 'BACKUP_STALE', message: '最近备份距今 ' + lastBackup.days.toFixed(0) + ' 天', suggestion: 'mem backup' });
   return { generatedAt: now, hours: hours, findings: findings, severity: findings.some(function (f) { return f.severity === 'warn'; }) ? 'warn' : 'ok' };
+}
+
+// ---- 守卫建议 → 可执行修复：先出计划（preview），带 confirm 才动手；每一步都写明是否可逆 ----
+const FIX_STEPS = {
+  sweep: { id: 'sweep', title: '休眠/归档低留存条目', safe: true, reversible: true, detail: '按遗忘曲线把低于阈值的条目降为 dormant/archived，随时 mem restore 找回' },
+  trunk: { id: 'trunk', title: '补一条主干草稿', safe: true, reversible: true, detail: '用最近的高重要度条目拼一节主干（不调 LLM），已有主干则在尾部追加' },
+  backup: { id: 'backup', title: '立刻备份数据库', safe: true, reversible: false, detail: '在 data/backups/ 生成一份 .db 快照' },
+  cleanup: { id: 'cleanup', title: '清理统计窗口', safe: true, reversible: false, detail: '只删超期的召回/守卫统计记录，不动任何记忆内容' },
+  merge: { id: 'merge', title: '合并近似条目', safe: false, reversible: true, detail: '把相似条目并入最重要那条，被并条目归档（可 restore）' }
+};
+
+export function planFix(store, input) {
+  const o = input || {};
+  const part = ensurePartition(store, { name: o.partition, title: o.partitionTitle });
+  const cfg = store.config;
+  const now = nowMs();
+  const auditRes = audit(store, { partition: part.name });
+  const rows = store.db.prepare("SELECT * FROM item WHERE partition_id = ? AND state != 'archived' AND deleted_at IS NULL").all(part.id);
+  const trunkMin = Number(cfg.curve.trunkImportance || 4);
+  const forgetTh = Number(cfg.curve.forgetThreshold || 0.25);
+  const stale = [];
+  for (const r of rows) {
+    if (r.pinned || Number(r.importance) >= trunkMin) continue;
+    if (retentionOf(r, now, cfg) < forgetTh) stale.push({ id: r.id, title: String(r.title || '').slice(0, 60), retention: Number(retentionOf(r, now, cfg).toFixed(3)) });
+  }
+  const recent = store.db.prepare("SELECT id, title FROM item WHERE partition_id = ? AND deleted_at IS NULL AND state = 'active' AND kind NOT IN ('trunk','report','scene') AND updated_at >= ? ORDER BY importance DESC, updated_at DESC LIMIT 8").all(part.id, now - 2 * 86400000);
+  const cleanupDays = Math.max(1, Number(o.cleanupDays || (cfg.maintain && cfg.maintain.cleanupDays) || 30));
+  const cutoff = now - cleanupDays * 86400000;
+  const oldRecall = store.db.prepare('SELECT COUNT(*) AS n FROM recall_event WHERE partition_id = ? AND ts < ?').get(part.id, cutoff);
+  const oldGuard = store.db.prepare('SELECT COUNT(*) AS n FROM guard_event WHERE partition_id = ? AND ts < ?').get(part.id, cutoff);
+  let mergeGroups = [];
+  try {
+    const dry = mergeSimilar(store, { partitionId: part.id, threshold: Number(o.threshold || (cfg.maintain && cfg.maintain.mergeThreshold) || 0.6), maxGroups: 10 });
+    mergeGroups = dry.groups || [];
+  } catch (err) { mergeGroups = []; }
+  const codes = Array.from(new Set(auditRes.findings.filter(function (f) { return f.partition === part.name; }).map(function (f) { return f.code; })));
+  const steps = [
+    Object.assign({}, FIX_STEPS.sweep, { count: stale.length, preview: stale.slice(0, 5) }),
+    Object.assign({}, FIX_STEPS.trunk, { count: recent.length, preview: recent.slice(0, 5).map(function (r) { return r.title; }) }),
+    Object.assign({}, FIX_STEPS.backup, { count: 1, preview: [] }),
+    Object.assign({}, FIX_STEPS.cleanup, { count: Number(oldRecall.n) + Number(oldGuard.n), preview: [], days: cleanupDays }),
+    Object.assign({}, FIX_STEPS.merge, { count: mergeGroups.length, preview: mergeGroups.map(function (g) { return (g.keeper ? g.keeper.title : '') + ' ← ' + g.members.length + ' 条'; }) })
+  ];
+  const digest = trunkDigest(store, { partition: part.name });
+  return {
+    partition: part.name,
+    generatedAt: now,
+    level: auditRes.severity,
+    codes: codes,
+    requiresConfirm: true,
+    confirmHint: '把要执行的步骤 id 放进 steps 并带 confirm=true；不给 steps 就只执行全部 safe 步骤。',
+    steps: steps,
+    trunk: { items: digest.items, tokens: digest.tokens, budget: digest.budget, text: digest.text }
+  };
+}
+
+export function applyFix(store, input) {
+  const o = input || {};
+  const part = ensurePartition(store, { name: o.partition, title: o.partitionTitle });
+  const plan = planFix(store, { partition: part.name, cleanupDays: o.cleanupDays });
+  const byId = new Map(plan.steps.map(function (s) { return [s.id, s]; }));
+  const wanted = Array.isArray(o.steps) && o.steps.length
+    ? o.steps.map(String).filter(function (id) { return byId.has(id); })
+    : plan.steps.filter(function (s) { return s.safe; }).map(function (s) { return s.id; });
+  if (o.confirm !== true) {
+    return { ok: false, requiresConfirm: true, partition: part.name, wanted: wanted, plan: plan };
+  }
+  const results = [];
+  for (const id of wanted) {
+    const step = byId.get(id);
+    const started = nowMs();
+    try {
+      let result;
+      if (id === 'sweep') result = sweep(store, { partitionId: part.id });
+      else if (id === 'trunk') result = archiveTrunk(store, { partition: part.name, title: '守卫自检补主干', summary: '守卫一键修复：按现有高重要度条目补一节主干。' });
+      else if (id === 'backup') result = backup(store);
+      else if (id === 'cleanup') {
+        const cutoff = nowMs() - Math.max(1, Number(o.cleanupDays || (store.config.maintain && store.config.maintain.cleanupDays) || 30)) * 86400000;
+        const r1 = store.db.prepare('DELETE FROM recall_event WHERE partition_id = ? AND ts < ?').run(part.id, cutoff);
+        const r2 = store.db.prepare('DELETE FROM guard_event WHERE partition_id = ? AND ts < ? AND deleted_at IS NULL').run(part.id, cutoff);
+        result = { recallEvents: Number(r1.changes || 0), guardEvents: Number(r2.changes || 0) };
+      } else if (id === 'merge') {
+        result = mergeSimilar(store, { partitionId: part.id, threshold: Number(o.threshold || (store.config.maintain && store.config.maintain.mergeThreshold) || 0.6), apply: true, maxGroups: 10 });
+      }
+      results.push({ id: id, title: step.title, ok: true, reversible: step.reversible, tookMs: nowMs() - started, result: result });
+    } catch (err) {
+      results.push({ id: id, title: step.title, ok: false, reversible: step.reversible, tookMs: nowMs() - started, error: String((err && err.message) || err) });
+    }
+  }
+  return { ok: results.every(function (r) { return r.ok; }), partition: part.name, applied: results.map(function (r) { return r.id; }), results: results, plan: null };
 }
 
 function backupAge(store) {

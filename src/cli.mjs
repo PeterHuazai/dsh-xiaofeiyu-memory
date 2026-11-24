@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { openStore, backup, rebuildFromShadow, integrity, listBackups, DEFAULT_CONFIG, deepMerge } from './db.mjs';
 import * as engine from './engine.mjs';
 import * as tasks from './tasks.mjs';
-import { checkGuard, audit, listGuardEvents, deleteGuardEvents, restoreGuardEvents, purgeGuardEvents } from './guard.mjs';
+import { checkGuard, audit, listGuardEvents, deleteGuardEvents, restoreGuardEvents, purgeGuardEvents, planFix, applyFix } from './guard.mjs';
 import * as vision from './vision.mjs';
 import * as vector from './vector.mjs';
 import * as tools from './tools.mjs';
@@ -61,10 +61,11 @@ function help() {
     '',
     '分区   mem partition add --name <slug> --title <标题> [--desc ..]',
     '       mem partition list',
-    '写入   mem remember --partition <p> --title <标题> [--body 正文] [--kind fact|decision|constraint|preference|task|report|note]',
+    '写入   mem remember --partition <p> --title <标题> [--body 正文] [--kind fact|decision|constraint|preference|task|report|note|trunk|scene]',
     '                      [--tags a,b] [--importance 1-5] [--pinned] [--task t_xxx]',
-    '召回   mem recall "关键词" --partition <p> [--limit 8] [--detail index|full|auto] [--dormant] [--task t_xxx]',
+    '召回   mem recall "关键词" --partition <p> [--limit 8] [--detail index|full|auto] [--budget 1200] [--dormant] [--task t_xxx]',
   '反馈   mem feedback <eventId> [--used 1|0]   （命中率与遗忘曲线的唯一信号来源）',
+  '主干速览 mem trunk --partition <p> [--digest] [--max-tokens 320]   # --digest 直接给一段能塞进上下文的主干摘要',
   '多模态 mem attach --itemId <id> --file <图片> [--caption 说明]',
   '向量   mem vector | mem reindex [分区] [--provider 1] | mem enrich [分区] [--limit 20]',
   '        mem describe --id <attachmentId>  或  --file <图片>   （视觉模型写描述，需先开 vision）',
@@ -84,6 +85,8 @@ function help() {
     '多模态 mem caption [--partition <p>] [--limit 20] [--all]   # 批量给图片写描述',
     '       mem caption status [--partition <p>]',
     '守卫   mem guard check --partition <p> [--tokens 150000] [--chars 240000] [--task t_xxx]',
+    '一键修复 mem fix --partition <p>                      # 只出计划（安全步骤预勾选）',
+    '       mem fix --partition <p> --apply [--step sweep,trunk,backup,cleanup,merge] [--cleanup-days 30] [--threshold 0.6]',
     '审查   mem audit [--partition <p>] [--hours 168]',
     '参数   mem config get | mem config set guard.contextBlockTokens=200000',
     '导出   mem export [--partition <p>] [--out file.json]',
@@ -137,14 +140,16 @@ async function main() {
   if (cmd === 'recall') {
     const r = engine.recall(store, {
       partition: need('partition'), query: rest[1] || flags.query || '', limit: flags.limit,
-      detail: flags.detail, includeDormant: !!flags.dormant, taskId: flags.task, sessionId: flags.session
+      detail: flags.detail, includeDormant: !!flags.dormant, taskId: flags.task, sessionId: flags.session,
+      budget: flags.budget === undefined ? undefined : Number(flags.budget)
     });
     if (asJson) return out(r);
     const lines = r.items.map(function (it, i) {
-      const head = String(i + 1) + '. [' + it.score.toFixed(2) + '] ' + it.title + '  (' + it.kind + ', 保留 ' + (it.retention * 100).toFixed(0) + '%)' + (it.pinned ? ' ★' : '') + (it.redundant ? ' [已读多次，正文省略]' : '');
+      const head = String(i + 1) + '. [' + it.score.toFixed(2) + '] ' + it.title + '  (' + it.kind + ', 保留 ' + (it.retention * 100).toFixed(0) + '%)' + (it.pinned ? ' ★' : '') + (it.redundant ? ' [已读多次，正文省略]' : '') + (it.layer ? ' · ' + it.layer : '');
       return it.body ? head + '\n   ' + it.body.replace(/\n/g, ' ') : head;
     });
-    const tail = 'eventId=' + r.eventId + '  候选 ' + r.candidates + ' 条，命中 ' + r.items.length + ' 条，耗时 ' + r.tookMs + 'ms';
+    const tail = 'eventId=' + r.eventId + '  候选 ' + r.candidates + ' 条，命中 ' + r.items.length + ' 条，耗时 ' + r.tookMs + 'ms' +
+      (r.budgetTokens === undefined ? '' : '  ·  token ' + r.totalTokens + '/' + r.budgetTokens + (r.budgetDropped ? '（超预算丢弃 ' + r.budgetDropped + ' 条）' : '') + (r.budgetDowngraded ? '（降级正文 ' + r.budgetDowngraded + ' 条）' : ''));
     return out(r, lines.join('\n') + '\n' + tail);
   }
   if (cmd === 'feedback') {
@@ -459,10 +464,35 @@ async function main() {
   }
   if (cmd === 'trunk') {
     const part = engine.partitionByName(store, need('partition'));
+    if (!part) throw new Error('没有这个分区：' + flags.partition);
+    if (flags.digest) {
+      const d = engine.trunkDigest(store, { partition: part.name, maxTokens: flags['max-tokens'] === undefined ? undefined : Number(flags['max-tokens']), maxItems: flags['max-items'] === undefined ? undefined : Number(flags['max-items']) });
+      if (asJson) return out(d);
+      const head = '主干摘要 ' + d.items + ' 条 / 约 ' + d.tokens + ' tokens（预算 ' + d.budget + (d.truncated ? '，已截断' : '') + '）  层级：★' + d.layerCounts.trunk + ' ·' + d.layerCounts.scene + ' 细节' + d.layerCounts.detail;
+      return out(d, head + '\n\n' + (d.text || '(这个分区还没有可当主干的内容)'));
+    }
     const rows = engine.trunkSnapshot(store, part.id);
     if (asJson) return out({ partition: part.name, items: rows });
     if (!rows.length) return out({ partition: part.name, items: rows }, '这个分区还没有主干记忆（pinned 或 importance >= trunkImportance）');
     return out({ partition: part.name, items: rows }, rows.map(function (r) { return r.id + '  ★' + r.importance + '  留存 ' + (r.retention * 100).toFixed(0) + '%  强化 ' + r.boost + '  ' + r.title; }).join('\n'));
+  }
+  if (cmd === 'fix') {
+    const part = engine.partitionByName(store, need('partition'));
+    if (!part) throw new Error('没有这个分区：' + flags.partition);
+    const steps = flags.step === undefined ? undefined : String(flags.step).split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+    const plan = planFix(store, { partition: part.name, cleanupDays: flags['cleanup-days'] === undefined ? undefined : Number(flags['cleanup-days']), threshold: flags.threshold === undefined ? undefined : Number(flags.threshold) });
+    if (!flags.apply) {
+      if (asJson) return out(plan);
+      const lines = plan.steps.map(function (s) {
+        return '  [' + (steps && steps.indexOf(s.id) < 0 ? ' ' : 'x') + '] ' + s.id.padEnd(8) + (s.safe ? '安全' : '需确认') + ' · ' + (s.reversible ? '可逆' : '不可逆') + '  ×' + s.count + '  ' + s.title + '\n        ' + s.detail;
+      });
+      const head = '守卫一键修复 · ' + part.name + '  等级 ' + plan.level + (plan.codes.length ? '（' + plan.codes.join(' / ') + '）' : '') + '\n主干摘要 ' + plan.trunk.items + ' 条 / 约 ' + plan.trunk.tokens + ' tokens';
+      return out(plan, head + '\n' + lines.join('\n') + '\n\n只预览，什么都没改。确认后加 --apply（可配合 --step ' + plan.steps.map(function (s) { return s.id; }).join(',') + '）');
+    }
+    const r = applyFix(store, { partition: part.name, steps: steps, confirm: true, cleanupDays: flags['cleanup-days'] === undefined ? undefined : Number(flags['cleanup-days']), threshold: flags.threshold === undefined ? undefined : Number(flags.threshold) });
+    if (r.ok === false && r.requiresConfirm) return out(r, '没有执行：需要 --apply 明确确认');
+    if (asJson) return out(r);
+    return out(r, '已执行 ' + r.applied + ' 步：\n' + r.results.map(function (x) { return '  ' + (x.ok ? '✓' : '✗') + ' ' + x.id.padEnd(8) + (x.error ? '  ' + x.error : '  ' + x.title + (x.reversible ? '' : '（不可逆）')); }).join('\n') + '\n\n跑 mem guard check 复查等级。');
   }
   if (cmd === 'reinforce') {
     const r = engine.reinforce(store, { id: argId(), strength: flags.strength, reason: flags.reason });

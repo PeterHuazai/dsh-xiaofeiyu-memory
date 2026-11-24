@@ -43,8 +43,10 @@ export const DEFAULT_CONFIG = {
     weightRelevance: 1.0,
     weightRetention: 0.65,
     weightImportance: 1.0,
-    pinnedBoost: 0.15
+    pinnedBoost: 0.15,
+    budgetTokens: 1200
   },
+  maintain: { cleanupDays: 30, mergeThreshold: 0.6, digestTokens: 320, maxDigestItems: 8 },
   guard: {
     contextWarnTokens: 120000,
     contextBlockTokens: 200000,

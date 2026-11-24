@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { openStore, backup, integrity, listBackups } from './db.mjs';
 import * as engine from './engine.mjs';
 import * as tasks from './tasks.mjs';
-import { checkGuard, modelSelfCheck, audit, listGuardEvents, deleteGuardEvents, restoreGuardEvents, purgeGuardEvents } from './guard.mjs';
+import { checkGuard, modelSelfCheck, audit, listGuardEvents, deleteGuardEvents, restoreGuardEvents, purgeGuardEvents, planFix, applyFix } from './guard.mjs';
 import * as harness from './harness.mjs';
 import * as vision from './vision.mjs';
 import * as vector from './vector.mjs';
@@ -238,6 +238,20 @@ export function createRoutes(store) {
   'POST /api/sweep': function () { return engine.sweep(store); },
   'POST /api/backup': function () { return backup(store); },
   'POST /api/guard/check': function (ctx) { return checkGuard(store, Object.assign({}, ctx.body, { source: ctx.body.source || 'real' })); },
+  'GET /api/guard/fix': function (ctx) { return planFix(store, { partition: q(ctx.url, 'partition', '') || null, cleanupDays: q(ctx.url, 'cleanupDays', '') || undefined, threshold: q(ctx.url, 'threshold', '') || undefined }); },
+  'POST /api/guard/fix': function (ctx) {
+    const body = ctx.body || {};
+    if (body.confirm !== true) return planFix(store, body);
+    return applyFix(store, body);
+  },
+  'POST /api/consolidate': function (ctx) { return engine.consolidate(store, ctx.body || {}); },
+  'GET /api/trunk/digest': function (ctx) {
+    return engine.trunkDigest(store, {
+      partition: q(ctx.url, 'partition', '') || null,
+      maxTokens: q(ctx.url, 'maxTokens', '') || undefined,
+      maxItems: q(ctx.url, 'maxItems', '') || undefined
+    });
+  },
   'POST /api/item/pin': function (ctx) { return tools.setPinned(store, { id: ctx.body.id, pinned: !!ctx.body.pinned }); },
   'POST /api/item/batch': function (ctx) { return batchItems(store, ctx.body); },
   'POST /api/guard/model-check': async function (ctx) {

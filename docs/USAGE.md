@@ -325,4 +325,51 @@ mem site --dir ./site                       # 导出静态 Markdown 站点（ind
 dsh plugin --profile web add link:G:/华仔的小肥余专属工作区/xiaofeiyu-memory
 ```
 
-插件会注册 13 个 `xfy_memory_*` 工具、挂 `/xfy-memory` 路由（与独立服务同一套 API），并在宿主带 `webServer` 时把 `lib/client.js` 注册成右侧栏的原生 React 面板；`agent/pre-step` 自动跑守卫、`agent/turn-stopping` 在 `autoSweep: true` 时自动清扫。安装细节、槽位与验证清单见 [DSH-PLUGIN.md](./DSH-PLUGIN.md)。
+插件会注册 14 个 `xfy_memory_*` 工具、挂 `/xfy-memory` 路由（与独立服务同一套 API），并在宿主带 `webServer` 时把 `lib/client.js` 注册成右侧栏的原生 React 面板；`agent/pre-step` 自动跑守卫、每个会话第一轮自动注入一段主干速览（`injectTrunk: true`，约 100~320 tokens），`agent/turn-stopping` 在 `autoSweep: true` 时自动清扫。安装细节、槽位与验证清单见 [DSH-PLUGIN.md](./DSH-PLUGIN.md)。
+
+## 22. v0.2：三层记忆 / token 预算 / 守卫一键修复
+
+### 22.1 三层记忆：主干 / 场景 / 细节
+
+不新增字段，直接由已有属性推导（`engine.mjs` 的 `layerOf`），老库零迁移：
+
+| 层 | 判定 | 怎么来 | 行为 |
+| --- | --- | --- | --- |
+| ★ 主干 | `kind='trunk'`，或 `pinned`、或 `importance >= curve.trunkImportance(4)` | `mem summarize`、`archiveTrunk`、手工 pin | 留存有 0.55 地板，强化系数加成，第一轮自动注入的就是这一层 |
+| · 场景 | `kind in (report, scene, task)` 且未 pin | `mem task end` 自动写一条 `场景：<标题>` | 跟着任务走，不进自动注入 |
+| 细节 | 其余 | `mem remember` 默认 | 靠 `mem recall` 按需召回，最容易掉留存 |
+
+```bash
+mem trunk --partition myproject --digest                 # 给一段能直接塞进上下文的主干速览
+mem trunk --partition myproject --digest --max-tokens 120 # 硬预算：超了就丢尾部并标记截断
+mem recall "关键词" --partition myproject --budget 1200    # 召回也有 token 预算（默认 1200）
+```
+
+`recall` 的预算策略是「先降级再丢」：某条全文超预算时先降到 index（前 90 字），还超就整条丢弃，返回值里带 `totalTokens / budgetTokens / budgetDropped / budgetDowngraded`，面板和 CLI 都会显示。
+
+任务收尾时 `endTask` 会自动 `consolidate`：把结论并进主干、再写一条场景记忆（同一 taskId 幂等更新），所以你只管干活，分层是收尾时自动成型的。
+
+### 22.2 守卫建议变成「可执行的一键修复」
+
+以前 `audit` 的 suggestion 只是一句「mem sweep --partition x」，还得自己想怎么执行。现在每个建议都对应一个可执行步骤：
+
+```bash
+mem fix --partition myproject                       # 只出计划：列出每一步、影响条数、是否安全/可逆
+mem fix --partition myproject --apply                # 执行全部「安全」步骤
+mem fix --partition myproject --apply --step backup  # 只执行指定步骤
+mem fix --partition myproject --apply --step sweep,trunk,backup,cleanup,merge
+```
+
+五个步骤：
+
+| id | 动作 | 安全 | 可逆 |
+| --- | --- | --- | --- |
+| `sweep` | 按遗忘曲线把低留存条目降为 dormant / archived | ✓ | ✓（`mem restore`） |
+| `trunk` | 用高重要度条目补一节主干草稿（不调 LLM） | ✓ | ✓ |
+| `backup` | 立刻备份数据库到 `data/backups/` | ✓ | ✗ |
+| `cleanup` | 只删超期的召回/守卫统计记录，不动记忆内容 | ✓ | ✗ |
+| `merge` | 合并近似条目（被并条目 archived + `superseded_by`） | ✗ | ✓ |
+
+**两步确认是硬约束**：不带 `confirm: true`（CLI 里是不带 `--apply`）时 `applyFix` 一律只返回计划、不执行；面板上的「执行选中」按钮本身也是两段式（再点一次确认）。`merge` 永远不算「安全」，必须手动勾。
+
+面板里同样的能力在「守卫」板块顶部：一张「一键修复」卡片，默认按 `safe` 预勾选，列出每个步骤的影响条数和预览，点「执行选中」才真的动数据库。

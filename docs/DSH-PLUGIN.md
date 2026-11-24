@@ -22,12 +22,12 @@
 
 ## 2. host 半端做了什么
 
-- **工具**：`xfy_memory_recall` / `remember` / `search` / `feedback` / `guard` / `audit` / `digest` / `health` / `dedupe` / `summarize` / `link` / `explain` / `task`。`inject` 写成 `{ required: ['tools'], optional: ['webServer'] }`——CLI profile 没有 webServer，写成必选会把工具注册一起拖死。
-- **HTTP**：`ctx.webServer.register({ kind: 'prefix', path: '/xfy-memory', handler })`，handler 里懒加载 `src/server.mjs`，用 `createRoutes(store)` + `dispatchRequest(routes, store, req, res, { webDir })` 分发，并把 `req.url` 上的 `/xfy-memory` 前缀切掉。静态页面取包内的 `web/`。
+- **工具**：`xfy_memory_recall` / `remember` / `search` / `feedback` / `guard` / `audit` / `digest` / `health` / `dedupe` / `summarize` / `link` / `explain` / `task` / `trunk`（14 个）。`inject` 写成 `['tools']`——CLI profile 没有 webServer，写成必选会把工具注册一起拖死。
+- **HTTP**：`ctx.webServer.register({ kind: 'prefix', path: '/xfy-memory', handler })`，handler 里懒加载 `src/server.mjs`，用 `createRoutes(store)` + `dispatchRequest(routes, store, req, res, { webDir })` 分发，并把 `req.url` 上的 `/xfy-memory` 前缀切掉。静态页面取包内的 `web/`。v0.2 新增 `/api/guard/fix`（GET 出计划 / POST 带 `confirm: true` 才执行）、`/api/consolidate`、`/api/trunk/digest`。
 - **闭环钩子**：
-  - `agent/pre-step` → 从 payload 里取分区（`payload.partition` 或配置的 `defaultPartition`）与 token 数（`payload.tokens` / `contextTokens` / `usage.total_tokens` / `context.tokens`），跑一次 `checkGuard(..., { source: 'auto' })`，落库供看板与面板统计。
+  - `agent/pre-step` → 中间件按 waterfall 规矩调 `next()`；取分区（`payload.partition` 或配置的 `defaultPartition`）与 token 数（`payload.tokens` / `contextTokens` / `usage.total_tokens` / 正文估算 `chars / 2.2`，取不到就跳过而不是记 0），跑一次 `checkGuard(..., { source: 'auto' })`；同一分区 5 分钟内、tokens 增长不足 2000 时不再重复写事件。第二轮起还可以往 `decision.messages` 注入主干速览（见第 11 节）。
   - `agent/turn-stopping` → **仅当配置 `autoSweep: true`** 才 `sweep`（休眠/归档是写操作，默认关）。
-- **配置**：`root`（记忆库根，默认 `~/.dsh/xiaofeiyu-memory`，也可用环境变量 `XFY_MEMORY_ROOT`）、`defaultPartition`、`autoSweep`。
+- **配置**：`root`（记忆库根，默认 `~/.dsh/xiaofeiyu-memory`，也可用环境变量 `XFY_MEMORY_ROOT`）、`defaultPartition`、`autoSweep`、`injectTrunk`（默认 true，第一轮注入主干速览）。
 
 ## 3. client 半端：面板怎么被加载
 
@@ -195,4 +195,38 @@ const routeUrl = (path) => {
 `contract/seed.ts` 的 `defaultSeed()`：当 `tabs.guide()` 恰好只有一条时，把**那一页**当作每个新会话的默认右栏 tab；找不到对应定义就 `throw new Error('sidebarRight: default tab kind "<kind>" is not registered')`。所以「记忆」页的 definition **不能**只登记一条 guide。现在 `TAB_DEF` 只有 `id/kind/title`，`guide` 留空，DSH 默认页不受影响。
 
 同理：`package.json` 的 `dsh.client.inject` 写的是**包名**（`@deepseek-ai/dsh-client-ui-sidebar-right`），不是服务名；服务名写在 JS 侧 `exports.inject` 里，而且 `slots` 必须常驻、`sidebarRightTabs`/`sidebarRight` 走 `ctx.inject([...], fn)` 子 fiber 等（服务缺席时插件不该 pending）。
+
+## 11. 第一轮自动注入「主干速览」是怎么塞进去的
+
+目标：每个新会话第一轮就带上记忆主干（约 100~320 tokens），后面不再重复，省 token。
+
+`agent/pre-step` 是 cordis **waterfall**，DSH 侧的调用在 `dsh-agent-loop/src/agent.ts` 的 `preStep()`：
+
+```ts
+const claimed = this.inbox.claim(...)
+const decision = await this.dispatch.waterfall('agent/pre-step', { messages: claimed, ...position, signal, modelSelection }, () => ({ kind: 'enter', messages: claimed }))
+if (decision.kind === 'reject') { ... }
+```
+
+所以插件必须：
+
+1. **先 `await next()` 拿到 decision，再把 decision 原样返回**——`onWaterfall()` 封装了这件事，即使我们的逻辑抛错也照样返回 decision，绝不把 `undefined` 返给 agent loop（否则就是 `Cannot read properties of undefined (reading 'kind')`，见第 9 节）；
+2. 只对 `decision.kind === 'enter'`、`payload.turn === 1 && payload.step === 1`、`injectTrunk !== false`、分区非空的会话动手；
+3. 用 `decision.messages.push(消息)` 追加，消息形状跟 DSH 自己的 runtime-context 一致：
+
+```js
+{
+  id: randomUUID(),
+  role: 'user',
+  content: [{ type: 'text', text }],
+  source: { kind: 'xiaofeiyu-memory', form: 'snapshot', sections: [{ name: 'xfy-memory', text }] }
+}
+```
+
+`source.kind` 是插件自己的签名（DSH 的 `MessageSource` 对未知 kind 直接放行），`form: 'snapshot'` 要求带 `sections`；正文用 `[小肥鱼记忆 · 主干速览]` 开头、附 recall/remember/task end 的引导语。每个 `partition + agentId` 只注入一次（`trunkInjected` Set）。
+
+为什么不用 `systemPrompt.section()`：它是「每一步都拼进系统提示」的通道，`AssembleContext` 只有 `{ scope?, signal? }`，拿不到 session/分区，也没法「只在第一轮」——每步都拼会持续吃 token 和缓存。
+
+配套：`trunkDigest()` 会过滤掉 `kind='task'` 的脚手架条目，按「先主干、再场景」排序，超 token 预算就截断尾部。
+
 
