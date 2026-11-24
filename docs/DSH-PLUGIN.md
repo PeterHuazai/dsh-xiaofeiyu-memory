@@ -96,7 +96,7 @@ dsh plugin --profile web remove dsh-xiaofeiyu-memory
 
 ## 6. 没有 webServer 时怎么办
 
-CLI profile 与老版本宿主可能没有 `webServer`：插件会**只**注册工具（`inject.optional` 就是为此），面板不出现；此时用独立服务看板：
+CLI profile 与老版本宿主可能没有 `webServer`：插件的 `inject` 只写 `['tools']`（这个 cordis 版本不认 `{ required, optional }` 对象写法），路由用 `ctx.inject(['webServer'], …)` 子 fiber 等它就绪；没有 webServer 时只注册工具、面板不出现，此时用独立服务看板：
 
 ```powershell
 node "G:\华仔的小肥余专属工作区\xiaofeiyu-memory\src\server.mjs" --port 8788
@@ -105,3 +105,31 @@ node "G:\华仔的小肥余专属工作区\xiaofeiyu-memory\src\server.mjs" --po
 ## 7. 数据落在哪
 
 插件形态下默认 `~/.dsh/xiaofeiyu-memory/data`（可用 `config.root` 或 `XFY_MEMORY_ROOT` 指到本仓库的 `data/` 共用同一份记忆）。影子日志 `data/shadow/*.jsonl`、备份 `data/backups/`、汇报 `data/reports/` 都在根目录下，`mem rebuild` 可从影子日志重建整库。
+
+## 8. 排查：面板「请求失败」
+
+面板的所有请求走 `'/xfy-memory/api/'`，失败才退到 `http://127.0.0.1:8788/api/`。所以「请求失败」只有两种原因：宿主路由没挂上，或独立服务没起。
+
+先看一键自检日志（插件每次激活都会写，固定位置，不受配置影响）：
+
+```powershell
+Get-Content "$env:USERPROFILE\.dsh\xfy-memory-boot.log" -Tail 20
+```
+
+正常应有 `route registered: /xfy-memory`；如果只有 `apply ok: route=waiting-for-webServer` 而没有后一行，说明宿主的 `webServer` 服务没就绪。
+
+### 装完 DSH 里 404 的四个真实坑（都已修，留档）
+
+1. **`inject` 不能写成对象**：`export const inject = { required: ['tools'], optional: ['webServer'] }` 会被这个 cordis（@deepseek-ai/cordis 4.x）当成两个服务名 `required` / `optional`，插件永远停在 `pending (waiting for services: required, optional)`。必须是数组：`export const inject = ['tools']`。
+2. **没 inject 的服务不能直接读**：`ctx.webServer` 会抛 `cannot get property "webServer" without inject`。用 `ctx.inject(['webServer'], (wctx) => wctx.webServer.register({...}))`。
+3. **工具 `parameters` 是「参数名 → 值 schema」的映射**，不是完整 JSON Schema 对象；传 `{ type: 'object', properties }` 会得到 `JsonSchemaError: unsupported JSON schema: parameters.type must be a value schema object`。
+4. **`.volatile()` 字段送来的是 cosmokit `Volatile` 引用**，必须 `config.root.get()` 取快照；直接读会得到 `"[object Object]"`，记忆库就会被开到一个叫 `[object Object]` 的目录里（表现为面板全 0、数据「丢了」）。`index.js` 的 `cfgGet()` 就是干这个的。
+
+### 不改代码就能立刻恢复的兜底
+
+```powershell
+node "G:\华仔的小肥余专属工作区\xiaofeiyu-memory\src\server.mjs" --port 8788
+```
+
+服务端带 `access-control-allow-origin: *`，面板会自动退到它，不用重启 DSH。
+

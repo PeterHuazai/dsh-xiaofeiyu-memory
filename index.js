@@ -7,6 +7,7 @@
  * ============================================================================
  */
 import { loadHostDeps } from './lib/hostdeps.mjs'
+import { appendFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -16,8 +17,9 @@ const z = hostDeps.z
 const defineTool = hostDeps.defineTool
 
 export const name = 'xiaofeiyu-memory'
-// webServer 只在 Web/桌面版存在，CLI profile 里没有；声明成 optional 才不会把工具注册也拖死
-export const inject = { required: ['tools'], optional: ['webServer'] }
+// 这个 cordis 版本的 inject 只认数组：对象写法 { required, optional } 会被当成两个服务名，
+// 插件会永远停在 pending (waiting for services: required, optional)。webServer 不声明，apply 里按需等。
+export const inject = ['tools']
 
 export const Config = !z ? undefined : z.object({
   /** 记忆库根目录（其下就是 data/、web/）。留空 = ~/.dsh/xiaofeiyu-memory */
@@ -30,8 +32,18 @@ export const Config = !z ? undefined : z.object({
 
 const cache = { root: '', store: null, api: null }
 
+// 声明成 volatile 的字段，宿主给的是 cosmokit Volatile 引用（{ get() }），必须 .get() 取值；
+// 直接读会拿到 "[object Object]"，记忆库就会开到一个叫 [object Object] 的目录里。
+function cfgGet(v, fallback) {
+  const empty = (x) => x === undefined || x === null || x === ''
+  if (v && typeof v === 'object' && typeof v.get === 'function') {
+    try { const x = v.get(); return empty(x) ? fallback : x } catch (e) { return fallback }
+  }
+  return empty(v) ? fallback : v
+}
+
 function rootOf(config) {
-  const raw = String((config && config.root) || process.env.XFY_MEMORY_ROOT || '').trim()
+  const raw = String(cfgGet(config && config.root, '') || process.env.XFY_MEMORY_ROOT || '').trim()
   return raw || join(homedir(), '.dsh', 'xiaofeiyu-memory')
 }
 
@@ -51,7 +63,7 @@ async function load(config) {
 }
 
 function partOf(args, config) {
-  const p = String((args && args.partition) || (config && config.defaultPartition) || '').trim()
+  const p = String(cfgGet(args && args.partition, '') || cfgGet(config && config.defaultPartition, '') || '').trim()
   if (!p) throw new Error('缺少 partition：一个话题/项目一个分区，分区之间记忆严格隔离，不会互相串味。')
   return p
 }
@@ -76,10 +88,18 @@ function slimItem(x) {
 }
 
 export function apply(ctx, config) {
+  // 宿主的 parameters 形状是「参数名 -> 值 schema」的映射，不是完整 JSON Schema 对象；
+  // 传 { type:'object', properties } 会被 JsonSchemaError: parameters.type must be a value schema object 拒掉。
+  const paramsOf = (p) => {
+    if (!p || typeof p !== 'object') return {}
+    if (p.type === 'object' && p.properties && typeof p.properties === 'object') return { ...p.properties }
+    return p
+  }
+
   const tool = (spec) => ctx.tools.register(defineTool({
     name: spec.name,
     description: spec.description,
-    parameters: spec.parameters,
+    parameters: paramsOf(spec.parameters),
     output: textOutput,
     async execute(args) { return safe(await spec.execute(args || {})) }
   }))
@@ -367,33 +387,60 @@ export function apply(ctx, config) {
     try { const d = fn(); if (typeof d === 'function') disposers.push(d) } catch (err) { /* 这个 profile 没有该能力，跳过 */ }
   }
 
-  keep(() => {
-    const ws = ctx.webServer
-    if (!ws || typeof ws.register !== 'function') return undefined
-    return ws.register({
-      kind: 'prefix',
-      path: '/xfy-memory',
-      handler: async (req, res) => {
-        try {
-          const api = await load(config)
-          if (!api.web) {
-            const srv = await import('./src/server.mjs')
-            api.web = { routes: srv.createRoutes(api.store), dispatch: srv.dispatchRequest, webDir: join(fileURLToPath(new URL('.', import.meta.url)), 'web') }
-          }
-          const raw = String(req.url || '/')
-          const cut = raw.indexOf('/xfy-memory')
-          let rest = cut >= 0 ? raw.slice(cut + '/xfy-memory'.length) : raw
-          if (!rest) rest = '/'
-          if (rest.charAt(0) !== '/') rest = '/' + rest
-          req.url = rest
-          return await api.web.dispatch(api.web.routes, api.store, req, res, { webDir: api.web.webDir })
-        } catch (err) {
-          const msg = String((err && err.message) || err)
-          try { res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ error: msg })) } catch (e) {}
-        }
+  // 启动自检日志：插件到底挂上了没有，直接看 <root>/data/plugin-boot.log
+  // 自检日志写到固定位置（不依赖配置里的 root，root 本身可能配错）
+  const bootLog = (line) => {
+    try {
+      const base = process.env.DSH_HOME || join(homedir(), '.dsh')
+      mkdirSync(base, { recursive: true })
+      appendFileSync(join(base, 'xfy-memory-boot.log'), new Date().toISOString() + ' ' + line + '\n')
+    } catch (err) {}
+  }
+
+  const xfyHandler = async (req, res) => {
+    try {
+      const api = await load(config)
+      if (!api.web) {
+        const srv = await import('./src/server.mjs')
+        api.web = { routes: srv.createRoutes(api.store), dispatch: srv.dispatchRequest, webDir: join(fileURLToPath(new URL('.', import.meta.url)), 'web') }
       }
-    })
-  })
+      const raw = String(req.url || '/')
+      const cut = raw.indexOf('/xfy-memory')
+      let rest = cut >= 0 ? raw.slice(cut + '/xfy-memory'.length) : raw
+      if (!rest) rest = '/'
+      if (rest.charAt(0) !== '/') rest = '/' + rest
+      req.url = rest
+      return await api.web.dispatch(api.web.routes, api.store, req, res, { webDir: api.web.webDir })
+    } catch (err) {
+      const msg = String((err && err.message) || err)
+      try { res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ error: msg })) } catch (e) {}
+    }
+  }
+
+  // webServer 只存在于 Web/桌面版；插件先激活（工具立刻可用），路由用子 fiber 等它就绪再挂。
+  // 注意：未 inject 的服务直接读 ctx.webServer 会抛 `cannot get property "webServer" without inject`。
+  let routeReady = false
+  const mountRoute = (wctx) => {
+    if (routeReady) return
+    try {
+      const ws = wctx && wctx.webServer
+      if (!ws || typeof ws.register !== 'function') return
+      const d = ws.register({ kind: 'prefix', path: '/xfy-memory', handler: xfyHandler })
+      if (typeof d === 'function') disposers.push(d)
+      routeReady = true
+      bootLog('route registered: /xfy-memory')
+    } catch (err) {
+      bootLog('route register failed: ' + String((err && err.message) || err))
+    }
+  }
+  try {
+    if (typeof ctx.inject === 'function') ctx.inject(['webServer'], (wctx) => mountRoute(wctx))
+    else mountRoute(ctx)
+  } catch (err) {
+    bootLog('webServer inject failed: ' + String((err && err.message) || err))
+  }
+  bootLog('root=' + rootOf(config) + ' defaultPartition=' + String(cfgGet(config && config.defaultPartition, '')))
+  bootLog('apply ok: route=' + (routeReady ? 'registered' : 'waiting-for-webServer'))
 
   keep(() => {
     if (typeof ctx.on !== 'function') return undefined
@@ -405,7 +452,7 @@ export function apply(ctx, config) {
       return undefined
     }
     const offs = []
-    const partitionOf = (payload) => String((payload && payload.partition) || (config && config.defaultPartition) || '').trim()
+    const partitionOf = (payload) => String(cfgGet(payload && payload.partition, '') || cfgGet(config && config.defaultPartition, '') || '').trim()
     const tokensOf = (payload) => {
       const c = [payload && payload.tokens, payload && payload.contextTokens, payload && payload.usage && payload.usage.total_tokens, payload && payload.context && payload.context.tokens];
       for (const v of c) { const n = Number(v); if (Number.isFinite(n) && n > 0) return n; }
@@ -425,7 +472,7 @@ export function apply(ctx, config) {
 
     // 回合结束：可选自动清扫（默认关，写操作要用户点头才开）
     const turnStop = on('agent/turn-stopping', async (payload) => {
-      if (!(config && config.autoSweep)) return undefined
+      if (!cfgGet(config && config.autoSweep, false)) return undefined
       const part = partitionOf(payload)
       if (!part) return undefined
       const api = await load(config)
