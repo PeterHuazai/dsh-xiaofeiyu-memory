@@ -1,14 +1,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { clamp, tokenize, retentionOf, ensurePartition, hydrate, remember, scoreRelevance } from './engine.mjs';
+import { clamp, tokenize, retentionOf, ensurePartition, requirePartition, hydrate, remember, scoreRelevance } from './engine.mjs';
 import { nowMs, integrity } from './db.mjs';
 import * as vector from './vector.mjs';
 
 function uid(prefix) { return prefix + '-' + crypto.randomBytes(6).toString('hex'); }
 function jsonParse(text, fallback) { try { return JSON.parse(text || ''); } catch (err) { return fallback; } }
 function low(s) { return String(s === undefined || s === null ? '' : s).toLowerCase(); }
-function partOf(store, input) { return ensurePartition(store, { name: input.partition || input.partitionName }); }
+// 工具层的读操作一律走 requirePartition：名字打错就报错，不偷偷建空分区
+function partOf(store, input) { return requirePartition(store, { name: input.partition || input.partitionName }); }
+function partOfCreate(store, input) { return ensurePartition(store, { name: input.partition || input.partitionName }); }
 function dayKey(ts) {
   const d = new Date(ts);
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');

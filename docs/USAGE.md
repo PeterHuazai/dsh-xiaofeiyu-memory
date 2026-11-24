@@ -373,3 +373,9 @@ mem fix --partition myproject --apply --step sweep,trunk,backup,cleanup,merge
 **两步确认是硬约束**：不带 `confirm: true`（CLI 里是不带 `--apply`）时 `applyFix` 一律只返回计划、不执行；面板上的「执行选中」按钮本身也是两段式（再点一次确认）。`merge` 永远不算「安全」，必须手动勾。
 
 面板里同样的能力在「守卫」板块顶部：一张「一键修复」卡片，默认按 `safe` 预勾选，列出每个步骤的影响条数和预览，点「执行选中」才真的动数据库。
+
+### 22.3 读操作不再偷偷建分区
+
+历史 bug：`recall` / `trunkDigest` / `planFix` / `checkGuard` 这类读入口内部调的是 `ensurePartition`，分区名打错（或者把分区 id 当名字传）会**静默建出一个空分区**，之后你会在 `mem partition list` 里看到 `1  1` 这种垃圾行。
+
+现在读操作走 `requirePartition`：分区不存在直接报 `unknown partition: xxx（先 mem partition add ...）`，不会建任何东西；只有真正的写入入口（`mem remember`、`mem task start`、`mem import`）保留「自动建分区」。工具层的 `xfy_memory_*` 走同样的严格规则。

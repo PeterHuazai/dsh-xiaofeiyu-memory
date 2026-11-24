@@ -38,6 +38,22 @@ export function ensurePartition(store, input) {
   return row;
 }
 
+// 读操作/只出计划的入口用这个：分区不存在就报错，绝不偷偷建一个空分区
+// （历史 bug：传分区 id 当名字，会静默建出 name="1" 的垃圾分区）
+export function requirePartition(store, input) {
+  const name = String((input && input.name) || '').trim();
+  if (!name) throw new Error('partition name required');
+  const found = store.db.prepare('SELECT * FROM partition WHERE name = ?').get(name);
+  if (!found) throw new Error('unknown partition: ' + name + '（先 mem partition add --name ' + name + ' --title "..." 建分区）');
+  if (input.title && input.title !== found.title) {
+    store.db.prepare('UPDATE partition SET title = ? WHERE id = ?').run(String(input.title), found.id);
+    const row = store.db.prepare('SELECT * FROM partition WHERE id = ?').get(found.id);
+    store.shadow.append('partition', row);
+    return row;
+  }
+  return found;
+}
+
 export function listPartitions(store) {
   return store.db.prepare('SELECT * FROM partition ORDER BY archived ASC, id ASC').all();
 }
@@ -102,7 +118,7 @@ export function estimateTokens(text, cfg) {
 // 紧凑主干：给「第一轮自动注入」和面板用的纯文本，硬性按 token 预算截断（超了就从尾巴丢条目，不硬塞）
 export function trunkDigest(store, input) {
   const o = input || {};
-  const part = ensurePartition(store, { name: o.partition, title: o.partitionTitle });
+  const part = requirePartition(store, { name: o.partition, title: o.partitionTitle });
   const cfg = store.config;
   const mcfg = cfg.maintain || {};
   const maxTokens = Math.max(80, Number(o.maxTokens || mcfg.digestTokens || 320));
@@ -305,7 +321,7 @@ function importanceFactor(importance, cfg) {
 export function recall(store, input) {
   const started = nowMs();
   const db = store.db;
-  const part = ensurePartition(store, { name: input.partition || input.partitionName, title: input.partitionTitle });
+  const part = requirePartition(store, { name: input.partition || input.partitionName, title: input.partitionTitle });
   const cfg = store.config;
   const includeDormant = input.includeDormant === undefined ? !!cfg.recall.includeDormant : !!input.includeDormant;
   const query = String(input.query || '').trim();
@@ -937,7 +953,7 @@ export function archiveTrunk(store, input) {
 export function consolidate(store, input) {
   const o = input || {};
   const db = store.db;
-  const part = ensurePartition(store, { name: o.partition, title: o.partitionTitle });
+  const part = requirePartition(store, { name: o.partition, title: o.partitionTitle });
   const now = nowMs();
   const title = String(o.title || '会话收尾').slice(0, 80);
   const out = { partition: part.name, trunk: null, scene: null, layers: null };
@@ -982,7 +998,7 @@ export function evalRetrieval(store, input) {
   const o = input || {};
   const db = store.db;
   const cfg = store.config;
-  const part = o.partitionId ? { id: Number(o.partitionId), name: String(o.partition || '') } : ensurePartition(store, { name: o.partition });
+  const part = o.partitionId ? { id: Number(o.partitionId), name: String(o.partition || '') } : requirePartition(store, { name: o.partition });
   const topK = Math.max(1, Number(o.topK || 5));
   const limit = Math.max(1, Number(o.limit || 40));
   const dims = Number((cfg.vector && cfg.vector.dims) || 256);

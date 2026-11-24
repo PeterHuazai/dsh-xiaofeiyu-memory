@@ -1,5 +1,5 @@
 import { nowMs, uid, backup } from './db.mjs';
-import { ensurePartition, retentionOf, clamp, hydrate, sweep, archiveTrunk, mergeSimilar, trunkDigest } from './engine.mjs';
+import { ensurePartition, requirePartition, retentionOf, clamp, hydrate, sweep, archiveTrunk, mergeSimilar, trunkDigest } from './engine.mjs';
 
 function jsonParse(text, fallback) { try { return JSON.parse(text); } catch (err) { return fallback; } }
 
@@ -32,7 +32,7 @@ function staleShare(store, partId, itemIds, now) {
 
 export function checkGuard(store, input) {
   const cfg = store.config.guard;
-  const part = ensurePartition(store, { name: input.partition, title: input.partitionTitle });
+  const part = requirePartition(store, { name: input.partition, title: input.partitionTitle });
   const now = nowMs();
   const tokens = Number(input.contextTokens || 0);
   const ratio = Number(store.config.tokens.charsPerToken || 1.7);
@@ -283,7 +283,7 @@ const FIX_STEPS = {
 
 export function planFix(store, input) {
   const o = input || {};
-  const part = ensurePartition(store, { name: o.partition, title: o.partitionTitle });
+  const part = requirePartition(store, { name: o.partition, title: o.partitionTitle });
   const cfg = store.config;
   const now = nowMs();
   const auditRes = audit(store, { partition: part.name });
@@ -328,7 +328,7 @@ export function planFix(store, input) {
 
 export function applyFix(store, input) {
   const o = input || {};
-  const part = ensurePartition(store, { name: o.partition, title: o.partitionTitle });
+  const part = requirePartition(store, { name: o.partition, title: o.partitionTitle });
   const plan = planFix(store, { partition: part.name, cleanupDays: o.cleanupDays });
   const byId = new Map(plan.steps.map(function (s) { return [s.id, s]; }));
   const wanted = Array.isArray(o.steps) && o.steps.length

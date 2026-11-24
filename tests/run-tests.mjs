@@ -415,6 +415,7 @@ const TMP2 = path.join(os.tmpdir(), 'xfy-mem-rebuild-' + process.pid);
 fs.rmSync(TMP2, { recursive: true, force: true });
 fs.mkdirSync(TMP2, { recursive: true });
 const store2 = openStore({ root: TMP2 });
+engine.ensurePartition(store2, { name: 'rb', title: 'rebuild 测试' });
 guard.checkGuard(store2, { partition: 'rb', contextTokens: 1000 });
 const keepId = guard.checkGuard(store2, { partition: 'rb', contextTokens: 2000 }).id;
 const killId = guard.checkGuard(store2, { partition: 'rb', contextTokens: 3000 }).id;
@@ -567,6 +568,23 @@ const applied = guard.applyFix(store, { partition: 'p-v02', steps: ['backup'], c
 ok(applied.ok === true && applied.applied.length === 1 && applied.applied[0] === 'backup' && applied.results[0].ok === true, '带 confirm 且指定 steps 只执行指定步骤', applied.results);
 const merged = guard.applyFix(store, { partition: 'p-v02', steps: ['merge'], confirm: true });
 ok(merged.ok === true && merged.results[0].id === 'merge', 'merge 只有显式指定才跑（永不默认）', merged.results);
+
+// 40 v0.2.1 读操作不再隐式建分区：名字打错就报错（写入仍允许自动建）
+function threw(fn) { try { fn(); return null; } catch (e) { return e; } }
+const badRecall = threw(function () { engine.recall(store, { partition: 'p-typo-not-exist', query: 'x' }); });
+ok(!!badRecall && /unknown partition/.test(badRecall.message), 'recall 对不存在的分区报 unknown partition', badRecall && badRecall.message);
+const badDigest = threw(function () { engine.trunkDigest(store, { partition: 'p-typo-not-exist' }); });
+ok(!!badDigest && /unknown partition/.test(badDigest.message), 'trunkDigest 不隐式建分区');
+const badPlan = threw(function () { guard.planFix(store, { partition: 'p-typo-not-exist' }); });
+ok(!!badPlan && /unknown partition/.test(badPlan.message), 'planFix 不隐式建分区');
+const badGuard = threw(function () { guard.checkGuard(store, { partition: 'p-typo-not-exist', contextTokens: 1000 }); });
+ok(!!badGuard && /unknown partition/.test(badGuard.message), 'checkGuard 不隐式建分区');
+const badTool = threw(function () { xfy.searchItems(store, { partition: 'p-typo-not-exist', q: 'x' }); });
+ok(!!badTool && /unknown partition/.test(badTool.message), 'tools 层搜索不隐式建分区');
+const typoLeak = store.db.prepare("SELECT COUNT(*) c FROM partition WHERE name = 'p-typo-not-exist'").get().c;
+ok(typoLeak === 0, '报错之后库里没有多出垃圾分区', typoLeak);
+const wroteNew = engine.remember(store, { partition: 'p-brand-new', title: '写入自动建分区', body: '写入路径保留隐式创建' });
+ok(!!wroteNew.item, 'remember（写入）仍可自动建分区', wroteNew.item && wroteNew.item.title);
 
 console.log('\n通过 ' + pass + ' / 失败 ' + fail);
 if (fail) { console.log(failures.join('\n')); process.exit(1); }
