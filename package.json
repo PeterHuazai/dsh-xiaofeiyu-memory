@@ -35,8 +35,7 @@
     "tests",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE",
-    "AGENTS.md"
+    "LICENSE"
   ],
   "scripts": {
     "start": "node src/server.mjs",
