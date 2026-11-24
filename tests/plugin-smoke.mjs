@@ -40,6 +40,38 @@ ok('task start', st.task && st.task.id, st.task && st.task.id);
 const en = await call('xfy_memory_task', { action: 'end', taskId: st.task.id, summary: '冒烟通过', markdown: '## 做了什么\n- 导入插件并逐个调工具\n' });
 ok('task end 写汇报', en.task && en.task.status === 'done' && !!en.report, en.task && en.task.status);
 
+// agent/pre-step 是 cordis 的 waterfall（中间件链）：监听器不调 next() 就把整条链的返回值
+// 变成 undefined，DSH agent-loop 随后读 decision.kind 直接抛错。这里把当时的失败复现成断言。
+const hooks = new Map();
+const ctx2 = {
+  tools: { register: (spec) => { return spec; } },
+  on: (name, fn) => { hooks.set(name, fn); return () => hooks.delete(name); },
+};
+mod.apply(ctx2, { root: tmp, defaultPartition: 'demo' });
+ok('注册了 agent/pre-step 监听器', typeof hooks.get('agent/pre-step') === 'function');
+ok('注册了 agent/turn-stopping 监听器', typeof hooks.get('agent/turn-stopping') === 'function');
+
+const preStep = hooks.get('agent/pre-step');
+let nextCalls = 0;
+const finalDecision = { kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: '你好' }] }] };
+const next = () => { nextCalls += 1; return finalDecision; };
+const settled = await preStep({ messages: finalDecision.messages, turn: 1, step: 1 }, next);
+ok('pre-step 调了 next()', nextCalls === 1, nextCalls);
+ok('pre-step 把链路返回值原样传下去（不是 undefined）', settled === finalDecision, settled && settled.kind);
+ok('pre-step 结果有 kind（agent-loop 会读 decision.kind）', !!(settled && settled.kind === 'enter'));
+
+// 记忆库写失败也不能吃掉 next()：把 store 换成一个坏掉的 root，再走一遍。
+hooks.clear();
+const ctx3 = {
+  tools: { register: (spec) => spec },
+  on: (name, fn) => { hooks.set(name, fn); return () => {} },
+};
+mod.apply(ctx3, { root: path.join(tmp, 'not-a-dir', "bad\u0000path"), defaultPartition: 'demo' });
+let nextCalls2 = 0;
+const yielded = await hooks.get('agent/pre-step')({ messages: [{ role: 'user', content: [{ type: 'text', text: 'x'.repeat(5000) }] }], turn: 1, step: 1 }, () => { nextCalls2 += 1; return { kind: 'enter', messages: [] }; });
+ok('记忆库出错时仍然 next()', nextCalls2 === 1, nextCalls2);
+ok('记忆库出错时仍返回 decision', !!(yielded && yielded.kind === 'enter'));
+
 const failed = checks.filter((c) => !c.pass);
 for (const c of checks) console.log((c.pass ? 'PASS ' : 'FAIL ') + c.label + (c.extra ? ' (' + c.extra + ')' : ''));
 console.log('插件冒烟：通过 ' + (checks.length - failed.length) + ' / 失败 ' + failed.length + ' · 临时库 ' + tmp);

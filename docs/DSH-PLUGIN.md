@@ -133,3 +133,66 @@ node "G:\华仔的小肥余专属工作区\xiaofeiyu-memory\src\server.mjs" --po
 
 服务端带 `access-control-allow-origin: *`，面板会自动退到它，不用重启 DSH。
 
+## 9. 排查：一启用插件，这一轮对话就「Cannot read properties of undefined (reading 'kind')」
+
+**这是 `agent/pre-step` 的 waterfall 契约，不是面板的问题。** 症状：启用插件后每一轮刚开就失败（turn/start 之后 20–50ms），会话日志里只有 `turn/start` + `inbox/spliced` + `turn/end`（`reason.kind = 'error'`），没有任何 `llm/*` 或 `step/*` 记录 —— 说明崩在模型调用之前。
+
+机制（dsh 0.2.2-rc.3）：
+
+- `@deepseek-ai/dsh-agent-loop` 的 `src/agent.ts:302-314` 把 `agent/pre-step` 当 **cordis waterfall** 派发：
+  `const decision = await this.dispatch.waterfall('agent/pre-step', {...}, () => ({ kind: 'enter' }))`，紧接着 `if (decision.kind === 'reject')`。
+- cordis 4.x 的 waterfall 是「中间件链」：**监听器必须调用 `next()`**，否则整条链的返回值就是这个监听器的返回值。
+- 旧版 `index.js` 写的是 `ctx.on('agent/pre-step', (payload) => fn(payload))`，从不调用 `next` → 返回 `undefined` → 宿主读 `decision.kind` 抛 `TypeError: Cannot read properties of undefined (reading 'kind')`。
+
+修法（现在的 `index.js`）：用 `onMiddleware(name, fn)` 包一层，`(payload, next)` 里无论记忆库成功、抛错还是 async 拒绝，都 `return next()`：
+
+```js
+const onMiddleware = (name, fn) => ctx.on(name, function (payload, next) {
+  const done = typeof next === 'function' ? next : () => undefined
+  const settle = () => done()
+  let pending
+  try { pending = fn(payload || {}) } catch (err) { return settle() }
+  if (pending && typeof pending.then === 'function') return pending.then(settle, settle)
+  return settle()
+})
+```
+
+另外顺手修的两处：`tokensOf()` 在 pre-step 的 payload 里根本没有 token 字段（永远估成 0，守卫从不触发），改成按消息正文估算（CJK 约 1 字 1 token，拉丁约 4 字符 1 token）；守卫写入加节流（同分区增量 < 2000 tokens 且 5 分钟内不重复写），避免每轮都落一条记录。
+
+回归测试（不需要真 DSH）：
+
+```powershell
+cd "G:\华仔的小肥余专属工作区\xiaofeiyu-memory"
+npm run test:smoke    # 18 项：middleware 有没有调 next、返回值是否原样透传
+npm run test:cordis   # 5 项：用真 cordis 4.1.0 复现 TypeError，再接插件验证不抛
+```
+
+`tests/cordis-waterfall.test.mjs` 会自动在 `DSH_CORDIS_PATH` → profile 的 `node_modules` → `.tmp-asar/c/...` 里找 cordis，找不到就打印「跳过」并 exit 0。
+
+## 10. 排查：面板「网络错误：Failed to fetch」
+
+桌面版的页面 origin 是 **`dsh-app://app/`**，插件路由由外壳 `protocol.handle` 转发到宿主同源；`window.__DSH_TRANSPORT__.streamBaseUrl` 是宿主真实 origin（跨源，插件路由不返 `Access-Control-Allow-*`）。
+
+旧代码 `api()` 的 bases 是 `['', 'http://127.0.0.1:8788/api/', 'http://127.0.0.1:8787/api/']`，`base` 为空串时 `'state?partition=x'` 变成**相对当前文档**的 URL，打到 `dsh-app://app/state?...`（或 web 版的 `/state?...`），前缀 `/xfy-memory/api/` 直接丢了 → 404 → 回落 8788/8787 也不通 → 面板报「网络错误（已尝试 3 个入口）」。
+
+现在 `lib/client.js` 用页面 base 解析（同 `dsh-better-sidebar` 的 hostRouteUrl 思路）：
+
+```js
+const routeUrl = (path) => {
+  const base = directoryBase(pageBase())          // document.baseURI → location.href → ''
+  if (!base) return API_PREFIX + path
+  return new URL('xfy-memory/api/' + path.replace(/^\/+/, ''), base).toString()
+}
+```
+
+- 保留反代前缀：`https://host/dataops/proxy/3080/xfy-memory/api/items`；
+- 剥掉前导斜杠再拼，`new URL` 才会挂在页面目录下而不是 origin 根；
+- 仍然保留 8788/8787 回落（独立服务、非桌面壳场景）；
+- `tests/client-panel.test.mjs` 第 5 节用 vm 沙箱里的 `document.baseURI` 断定了三种壳（web / `dsh-app://` / 反代）的首个请求 URL。
+
+### 另一个坑：`sidebarRightTabs` 的 `guide` 会抢默认右栏页
+
+`contract/seed.ts` 的 `defaultSeed()`：当 `tabs.guide()` 恰好只有一条时，把**那一页**当作每个新会话的默认右栏 tab；找不到对应定义就 `throw new Error('sidebarRight: default tab kind "<kind>" is not registered')`。所以「记忆」页的 definition **不能**只登记一条 guide。现在 `TAB_DEF` 只有 `id/kind/title`，`guide` 留空，DSH 默认页不受影响。
+
+同理：`package.json` 的 `dsh.client.inject` 写的是**包名**（`@deepseek-ai/dsh-client-ui-sidebar-right`），不是服务名；服务名写在 JS 侧 `exports.inject` 里，而且 `slots` 必须常驻、`sidebarRightTabs`/`sidebarRight` 走 `ctx.inject([...], fn)` 子 fiber 等（服务缺席时插件不该 pending）。
+

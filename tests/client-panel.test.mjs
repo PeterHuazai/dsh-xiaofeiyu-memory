@@ -97,8 +97,11 @@ console.log('  ✓ 装载成功，version=' + String(bundle.version) + '，导�
 // ---------------------------------------------------------------------------
 section('3 · 假 ctx 注册断言');
 function makeCtx() {
-  return {
+  const self = {
     effects: 0,
+    // 子 fiber：sidebarRightTabs / sidebarRight 到位后才回调（这里直接当已就绪）
+    inject: function (names, fn) { self.injectedServices.push(names.join('+')); return fn(self); },
+    injectedServices: [],
     slots: {
       injected: [],
       registered: [],
@@ -109,19 +112,21 @@ function makeCtx() {
     sidebarRight: { opened: [], openTab: function (kind) { this.opened.push(kind); return true; } },
     effect: function (fn) { this.effects += 1; return fn; }
   };
+  return self;
 }
 const ctx = makeCtx();
 let applyThrew = null;
 try { bundle.apply(ctx); } catch (e) { applyThrew = e; }
 ok(!applyThrew, 'apply() 不抛错', applyThrew && applyThrew.message);
-eq(Array.isArray(bundle.inject) ? bundle.inject.length : -1, 3, 'exports.inject 长度 3');
-ok(JSON.stringify(bundle.inject) === JSON.stringify(['slots', 'sidebarRightTabs', 'sidebarRight']), 'exports.inject 内容');
+ok(JSON.stringify(bundle.inject) === JSON.stringify(['slots']), 'exports.inject 只等 slots（sidebar 服务放进子 fiber）', JSON.stringify(bundle.inject));
+ok(ctx.injectedServices.indexOf('sidebarRightTabs+sidebarRight') >= 0, '用子 fiber 等 sidebarRightTabs + sidebarRight');
 ok(ctx.slots.injected.indexOf('sidebar.right.pane.tab') >= 0, "注册了 slot 'sidebar.right.pane.tab'");
 ok(ctx.slots.injected.indexOf('conversation.session.header.actions') >= 0, "注册了 slot 'conversation.session.header.actions'");
 eq(ctx.sidebarRightTabs.tab && ctx.sidebarRightTabs.tab.kind, 'xfy-memory', 'tab 类型 kind === xfy-memory');
 eq(ctx.sidebarRightTabs.tab && ctx.sidebarRightTabs.tab.id, 'xfy-memory-pane', 'tab id');
 eq(typeof (ctx.sidebarRightTabs.tab && ctx.sidebarRightTabs.tab.title), 'function', 'tab title 是函数');
-ok(Array.isArray(ctx.sidebarRightTabs.tab && ctx.sidebarRightTabs.tab.guide) && ctx.sidebarRightTabs.tab.guide.length > 0, 'tab guide 非空');
+// 单条 guide 会被 defaultSeed 当成默认页，把每个新会话的右栏抢成记忆面板 —— 必须没有
+ok(!ctx.sidebarRightTabs.tab || !ctx.sidebarRightTabs.tab.guide || ctx.sidebarRightTabs.tab.guide.length === 0, 'tab 不抢默认页（guide 为空）');
 const paneReg = ctx.slots.registered.filter(function (r) { return r.def && r.def.name === 'sidebar.right.pane.tab'; })[0];
 ok(!!paneReg, 'slot.register 收到 pane 定义');
 eq(paneReg && paneReg.def.key, 'xfy-memory-pane', 'pane key === xfy-memory-pane');
@@ -136,6 +141,20 @@ ok(bundle.registered.tabs && bundle.registered.pane && bundle.registered.header,
 let brokenThrew = null;
 try { bundle.apply(undefined); bundle.apply({}); bundle.apply({ slots: null, sidebarRightTabs: { register: function () { throw new Error('boom'); } } }); } catch (e) { brokenThrew = e; }
 ok(!brokenThrew, 'apply() 对残缺 ctx 也不抛错', brokenThrew && brokenThrew.message);
+// 右栏服务永远没到位（比如 side-bar 插件没加载）：面板本体照样挂上，tab 不注册、不抛
+const dormant = {
+  slotNames: [],
+  slots: {
+    inject: function (name, fn) { dormant.slotNames.push(name); return fn(); },
+    register: function () { return function () {}; }
+  },
+  inject: function () { return null; }
+};
+let dormantThrew = null;
+try { bundle.apply(dormant); } catch (e) { dormantThrew = e; }
+ok(!dormantThrew, '右栏服务缺席时 apply() 不抛错', dormantThrew && dormantThrew.message);
+ok(dormant.slotNames.indexOf('sidebar.right.pane.tab') >= 0, '右栏服务缺席时仍注册面板 slot');
+ok(dormant.slotNames.indexOf('conversation.session.header.actions') < 0, '右栏服务缺席时不注册头部按钮');
 console.log('  ✓ slot=' + ctx.slots.injected.join(' + ') + '，kind=' + ctx.sidebarRightTabs.tab.kind + '，header.id=' + headReg.def.id);
 
 // ---------------------------------------------------------------------------
@@ -301,8 +320,36 @@ for (const item of bundle.PANES) {
   }
 }
 
+// 页面 base 解析：这是「一打开面板就网络错误」的原始 bug —— url 必须带上 /xfy-memory/api/
+// 前缀，并且挂在页面自己的 origin 上（桌面壳是 dsh-app，不能打宿主真实端口）。
+const pageDoc = function (baseURI) { sandbox.document = { baseURI: baseURI }; };
+pageDoc('http://127.0.0.1:65174/');
+fetchCalls.length = 0;
+fetchImpl = async function (url) {
+  fetchCalls.push(String(url));
+  return { ok: true, status: 200, text: async function () { return JSON.stringify({ ok: true }); } };
+};
+let pageData = null;
+try { pageData = await bundle.api('state?partition=p1'); } catch (e) { /* 下面断言会看见 */ }
+eq(fetchCalls[0], 'http://127.0.0.1:65174/xfy-memory/api/state?partition=p1', '页面 base 解析出带前缀的宿主路由');
+ok(!!pageData && pageData.ok === true, '200 数据直接返回');
+eq(fetchCalls.length, 1, '成功之后不再试兜底入口');
+
+// 桌面壳：dsh-app://app/ 页面 → 同源转发路径，不能落到 127.0.0.1:8788
+pageDoc('dsh-app://app/');
+fetchCalls.length = 0;
+try { await bundle.api('partition/p1'); } catch (e) { /* 只为看 URL */ }
+eq(fetchCalls[0], 'dsh-app://app/xfy-memory/api/partition/p1', '桌面壳里走页面同源（dsh-app）入口');
+
+// 反代目录前缀必须保留
+pageDoc('https://example.com/dataops/proxy/3080/');
+fetchCalls.length = 0;
+try { await bundle.api('items?partition=p1'); } catch (e) { /* 同上 */ }
+eq(fetchCalls[0], 'https://example.com/dataops/proxy/3080/xfy-memory/api/items?partition=p1', '反代前缀不被吃掉');
+delete sandbox.document;
+
 // ---------------------------------------------------------------------------
-section('5 · api() 入口回退与服务端错误');
+section('6 · api() 入口回退与服务端错误');
 fetchCalls.length = 0;
 fetchImpl = async function (url) {
   fetchCalls.push(String(url));

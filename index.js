@@ -451,33 +451,79 @@ export function apply(ctx, config) {
       } catch (err) {}
       return undefined
     }
+    /**
+     * cordis 的 waterfall 是「中间件链」：监听器必须调用 next() 把链传下去，
+     * 否则整条链的返回值就是这个监听器的返回值。DSH agent-loop 的 agent/pre-step
+     * 拿到 undefined 后立刻读 decision.kind，于是每一轮都在 turn/start 后 20–50ms
+     * 以 "Cannot read properties of undefined (reading 'kind')" 结束（用户看到的本轮失败）。
+     * 这里必须：无论记忆库那边成功、失败还是超时，都 return next()；异常绝不能逃逸。
+     */
+    const onMiddleware = (name, fn) => {
+      try {
+        const off = ctx.on(name, function (payload, next) {
+          const done = typeof next === 'function' ? next : function () { return undefined }
+          const settle = function () { return done() }
+          let pending
+          try { pending = fn(payload || {}) } catch (err) { return settle() }
+          if (pending && typeof pending.then === 'function') return pending.then(settle, settle)
+          return settle()
+        })
+        if (typeof off === 'function') return off
+      } catch (err) {}
+      return undefined
+    }
     const offs = []
     const partitionOf = (payload) => String(cfgGet(payload && payload.partition, '') || cfgGet(config && config.defaultPartition, '') || '').trim()
+
+    // payload 里没有 token 计数时，按消息正文估算一个（CJK 约 1 字 1 token，拉丁约 4 字符 1 token）。
+    const estimateTokens = (messages) => {
+      let chars = 0
+      for (const m of Array.isArray(messages) ? messages : []) {
+        for (const part of Array.isArray(m && m.content) ? m.content : []) {
+          if (part && typeof part.text === 'string') chars += part.text.length
+        }
+      }
+      return chars > 0 ? Math.round(chars / 2.2) : 0
+    }
     const tokensOf = (payload) => {
       const c = [payload && payload.tokens, payload && payload.contextTokens, payload && payload.usage && payload.usage.total_tokens, payload && payload.context && payload.context.tokens];
       for (const v of c) { const n = Number(v); if (Number.isFinite(n) && n > 0) return n; }
-      return 0;
+      return estimateTokens(payload && payload.messages);
     };
 
-    // 上下文压力自动记一条守卫事件（只写日志，不拦 agent；拦不拦由工具里的 guard 决定）
-    const preStep = on('agent/pre-step', async (payload) => {
-      const part = partitionOf(payload)
-      const tokens = tokensOf(payload)
-      if (!part || !tokens) return undefined
-      const api = await load(config)
-      await api.guard.checkGuard(api.store, { partition: part, contextTokens: tokens, source: 'auto' })
-      return undefined
+    // 上下文压力自动记一条守卫事件（只写日志，不拦 agent；拦不拦由工具里的 guard 决定）。
+    // 写完 next() 之外还要节流：每轮每步都写一条会把守卫日志灌满，也让 pre-step 变慢。
+    const guardWrite = { key: '', tokens: 0, at: 0 }
+    const preStep = onMiddleware('agent/pre-step', async (payload) => {
+      try {
+        const part = partitionOf(payload)
+        const tokens = tokensOf(payload)
+        if (!part || !tokens) return
+        const now = Date.now()
+        const sameSession = guardWrite.key === part
+        if (sameSession && tokens - guardWrite.tokens < 2000 && now - guardWrite.at < 5 * 60 * 1000) return
+        const api = await load(config)
+        await api.guard.checkGuard(api.store, { partition: part, contextTokens: tokens, source: 'auto' })
+        guardWrite.key = part
+        guardWrite.tokens = tokens
+        guardWrite.at = now
+      } catch (err) {
+        // 记忆库写不进去也不能影响这一轮对话
+      }
     })
     if (preStep) offs.push(preStep)
 
     // 回合结束：可选自动清扫（默认关，写操作要用户点头才开）
     const turnStop = on('agent/turn-stopping', async (payload) => {
-      if (!cfgGet(config && config.autoSweep, false)) return undefined
-      const part = partitionOf(payload)
-      if (!part) return undefined
-      const api = await load(config)
-      api.engine.sweep(api.store, { partitionId: api.engine.partitionByName(api.store, part).id })
-      return undefined
+      try {
+        if (!cfgGet(config && config.autoSweep, false)) return
+        const part = partitionOf(payload)
+        if (!part) return
+        const api = await load(config)
+        api.engine.sweep(api.store, { partitionId: api.engine.partitionByName(api.store, part).id })
+      } catch (err) {
+        // 同上：清扫失败只记不抛
+      }
     })
     if (turnStop) offs.push(turnStop)
 

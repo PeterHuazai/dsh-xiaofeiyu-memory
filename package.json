@@ -41,7 +41,9 @@
     "start": "node src/server.mjs",
     "test": "node tests/run-tests.mjs",
     "check": "node tests/run-tests.mjs",
-    "smoke": "node tests/plugin-smoke.mjs"
+    "smoke": "node tests/plugin-smoke.mjs",
+    "test:client": "node tests/client-panel.test.mjs",
+    "test:cordis": "node tests/cordis-waterfall.test.mjs"
   },
   "engines": {
     "dsh": ">=0.1.7-rc.1",
@@ -70,9 +72,7 @@
     "client": {
       "platform": "web",
       "inject": [
-        "slots",
-        "sidebarRightTabs",
-        "sidebarRight"
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
       ]
     }
   },
