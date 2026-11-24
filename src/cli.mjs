@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { openStore, backup, rebuildFromShadow, integrity, listBackups, DEFAULT_CONFIG, deepMerge } from './db.mjs';
 import * as engine from './engine.mjs';
 import * as tasks from './tasks.mjs';
@@ -77,7 +78,7 @@ function help() {
     '休眠   mem sweep                     # 按遗忘曲线把低保留条目转成 dormant',
     '任务   mem task start --partition <p> --title <标题> [--goal ..]',
     '       mem task log --id <taskId> --note .. [--tokens N]',
-    '       mem task end --id <taskId> [--summary ..] [--report-file <path>] [--partition <p>]',
+    '       mem task end --id <taskId> [--summary ..] [--md "## 做了什么\\n- ..."] [--report-file <path>] [--partition <p>] [--no-archive]',
     '汇报   mem report --partition <p> [--title ..] [--summary ..] [--file <md>] [--task <id>]',
     '       mem report list [--partition <p>] [--trash] | delete <id> | restore <id> | purge [--days 30]',
     '多模态 mem caption [--partition <p>] [--limit 20] [--all]   # 批量给图片写描述',
@@ -89,6 +90,13 @@ function help() {
     '导入   mem import --file file.json [--rename-partition newname]',
     '备份   mem backup | mem backups | mem integrity | mem rebuild',
     '统计   mem stats [--partition <p>] [--hours 24]',
+    '主干   mem trunk --partition <p>          # 谁能豁免衰老 + 强化到什么程度',
+    '强化   mem reinforce <itemId> [--strength 1.5] [--reason ..]   # 稳定度与强化系数同乘',
+    '曲线   mem forecast <itemId> [--days 90]   # 未来留存预测（主干带地板线）',
+    '合并   mem merge --partition <p> [--threshold 0.6] [--apply]   # 默认只预演',
+    '评测   mem eval --partition <p> [--topK 5]   # 三种权重变体的命中率/MRR/token',
+    '日报   mem daily [--partition <p>] [--days 7] [--dir data]   # 记忆健康日报（markdown）',
+    '站点   mem site [--partition <p>] [--dir <目录>]   # 导出静态 Markdown 站点',
     '网页   mem ui [--port 8787]'
   ].join('\n');
 }
@@ -199,8 +207,11 @@ async function main() {
     }
     if (sub === 'log') return out(tasks.taskLog(store, { taskId: argId(), note: flags.note, tokens: flags.tokens }));
     if (sub === 'end' || sub === 'stop') {
-      const md = flags['report-file'] ? fs.readFileSync(String(flags['report-file']), 'utf8') : undefined;
-      const r = tasks.endTask(store, { taskId: argId(), summary: flags.summary, markdown: md, partition: flags.partition, tokens: flags.tokens, abort: !!flags.abort });
+      const md = flags['report-file']
+        ? fs.readFileSync(String(flags['report-file']), 'utf8')
+        : (flags.md === undefined ? undefined : String(flags.md).replace(/\\n/g, '\n'));
+      const archive = !flags['no-archive'] && String(flags.archive || '1') !== '0';
+      const r = tasks.endTask(store, { taskId: argId(), summary: flags.summary, markdown: md, partition: flags.partition, tokens: flags.tokens, abort: !!flags.abort, archive: archive });
       return out(r, '任务已关闭：' + r.task.id + (r.report ? '  汇报：' + r.report.path : '  (未写汇报)'));
     }
     return out(help());
@@ -446,10 +457,58 @@ async function main() {
     if (!r.created) return out(r, '未生成主干：' + r.reason);
     return out(r, '已生成主干：' + r.item.id + '  ' + r.item.title + '\n  归纳 ' + r.sources.length + ' 条' + (r.superseded.length ? '，取代旧主干 ' + r.superseded.length + ' 条' : ''));
   }
+  if (cmd === 'trunk') {
+    const part = engine.partitionByName(store, need('partition'));
+    const rows = engine.trunkSnapshot(store, part.id);
+    if (asJson) return out({ partition: part.name, items: rows });
+    if (!rows.length) return out({ partition: part.name, items: rows }, '这个分区还没有主干记忆（pinned 或 importance >= trunkImportance）');
+    return out({ partition: part.name, items: rows }, rows.map(function (r) { return r.id + '  ★' + r.importance + '  留存 ' + (r.retention * 100).toFixed(0) + '%  强化 ' + r.boost + '  ' + r.title; }).join('\n'));
+  }
+  if (cmd === 'reinforce') {
+    const r = engine.reinforce(store, { id: argId(), strength: flags.strength, reason: flags.reason });
+    return out(r, '已强化：' + r.item.title + '\n  稳定度 ' + r.before.stability + ' → ' + r.after.stability + ' · 强化系数 ' + r.before.boost + ' → ' + r.after.boost);
+  }
+  if (cmd === 'merge') {
+    const part = engine.partitionByName(store, need('partition'));
+    const r = engine.mergeSimilar(store, { partitionId: part.id, threshold: flags.threshold, apply: !!flags.apply, maxGroups: flags.max });
+    if (asJson) return out(r);
+    if (!r.groups.length) return out(r, '没有相似度超过 ' + r.threshold + ' 的组（扫描 ' + r.candidates + ' 条）');
+    const lines = r.groups.map(function (g, i) {
+      return String(i + 1) + '. 保留 ' + g.keeper.title + '\n' + g.members.map(function (m) { return '     <- ' + (m.score * 100).toFixed(1) + '%  ' + m.title; }).join('\n');
+    });
+    lines.push(r.dryRun ? '（预演，没有写库；确认无误加 --apply 真正合并）' : '已合并 ' + r.merged + ' 条');
+    return out(r, lines.join('\n'));
+  }
+  if (cmd === 'eval') {
+    const r = engine.evalRetrieval(store, { partition: need('partition'), topK: flags.topk || flags.topK, limit: flags.limit });
+    if (asJson) return out(r);
+    const lines = ['检索评测 [' + r.partition + '] · 每条标题自检索，比对三种权重'];
+    for (const v of r.variants) lines.push('  ' + v.name.padEnd(14) + ' 命中率 ' + (v.hitRate * 100).toFixed(1) + '%  MRR ' + v.mrr.toFixed(3) + '  平均 ' + v.avgTokens + ' token');
+    return out(r, lines.join('\n'));
+  }
+  if (cmd === 'daily') {
+    const r = tasks.healthReport(store, { partition: flags.partition, days: flags.days, dir: flags.dir });
+    if (asJson) return out(r);
+    return out(r, r.markdown);
+  }
+  if (cmd === 'site') {
+    const r = tasks.exportSite(store, { partition: flags.partition, dir: flags.dir, title: flags.title });
+    return out(r, '静态站点已导出：' + r.dir + '\n  文件 ' + r.files.join(', ') + ' · 分区 ' + r.partitions.length + ' · 汇报 ' + r.reports + ' 篇 · index.html ' + r.bytes + ' 字节');
+  }
+  if (cmd === 'forecast') {
+    const row = store.db.prepare('SELECT * FROM item WHERE id = ?').get(argId());
+    if (!row) throw new Error('unknown item: ' + argId());
+    const r = engine.projectCurve(row, store.config, Number(flags.days || 90));
+    if (asJson) return out(r);
+    const lines = ['曲线预测：' + (r.title || r.id), '  稳定度 ' + r.stability + '（基础 ' + r.baseStability + '）· 强化系数 ' + r.boost + ' · 主干 ' + (r.trunk ? '是' : '否') + (r.trunk ? ' · 地板 ' + r.floor : '')];
+    for (const pt of r.points) if ([0, 7, 30, 90, 180, 365].indexOf(pt.day) !== -1) lines.push('  +' + pt.day + ' 天  留存 ' + (pt.retention * 100).toFixed(1) + '%');
+    return out(r, lines.join('\n'));
+  }
   if (cmd === 'ui') {
     const { spawn } = await import('node:child_process');
     const port = String(flags.port || store.config.server.port || 8787);
-    const child = spawn(process.execPath, [path.join(store.root, 'src', 'server.mjs'), '--port', port], { detached: true, stdio: 'ignore' });
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const child = spawn(process.execPath, [path.join(here, 'server.mjs'), '--port', port], { detached: true, stdio: 'ignore' });
     child.unref();
     console.log('看板已启动：http://127.0.0.1:' + port);
     return;

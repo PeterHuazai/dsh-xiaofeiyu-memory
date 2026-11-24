@@ -5,7 +5,7 @@
 这是一个 **DeepSeek Harness（DSH）插件**，也是一套可以独立运行的本地记忆库：
 多轮长对话里最容易出问题的两件事 ——「记住不该混的」和「忘掉不该记的」—— 它都做了工程化处理。
 
-> 作者说明：这是**非人工智能专业的学生**拿 DeepSeek Harness 写着玩的插件。功能是真的能跑（129 个自动化测试全绿），
+> 作者说明：这是**非人工智能专业的学生**拿 DeepSeek Harness 写着玩的插件。功能是真的能跑（148 个自动化测试全绿），
 > 但设计上一定还有不少幼稚和可以改进的地方，欢迎大家指正和评价，不喜也勿喷 🙏
 
 ---
@@ -20,6 +20,7 @@
 | 找不到上次那条结论 | **两段式召回**：`index` 只给前 90 字（省 token），真要用再取全文；再加向量余弦 + DeepSeek 语义指纹兜住「换了个说法」 |
 | 不知道记忆到底好不好用 | **实时看板**：命中率趋势、每条的记忆曲线、每个分区的记忆板块，图表可交互、可导出导入、参数可在线微调 |
 | 库坏了全丢 | **多重保险**：SQLite 主库 + JSONL 影子日志（可从日志重建）+ 定时备份 + 完整性校验 + 回收站 + 汇报可恢复 |
+| 重要结论记得不如随手记的牢 | **FSRS 式自适应 + 主干强化**：命中降难度、拉长间隔，遗忘打折；主干有留存地板（默认 0.55）并可用 `reinforce` 追加强化 |
 
 ## 三个核心机制（一句话版）
 
@@ -32,6 +33,8 @@
    - `pinned` 或 `importance >= trunkImportance` 的条目**永不休眠** —— 这就是「保留主干」。
 3. **守卫（guard）**：`score = 0.45*上下文压力 + 0.25*(1-命中率) + 0.2*重复读取 + 0.1*陈旧占比`，
    并且有**硬阈值**：上下文 token 越过 `contextWarnTokens` 直接 warn，越过 `contextBlockTokens` 直接 block（不靠分数加权碰运气）。
+
+再往上还有一层**闭环**：`task start` 给主干 → 干活时 `recall/feedback/guard` → `task end` 自动归档主干并清理休眠 → `mem daily` 出健康日报、`mem eval` 量化召回质量、`mem site` 导出静态站点。插件形态下 `agent/pre-step` 与 `agent/turn-stopping` 会自动替你跑守卫（写操作的自动清扫默认关闭）。
 
 ## 安装
 
@@ -47,6 +50,8 @@ dsh plugin --profile web add link:G:/华仔的小肥余专属工作区/xiaofeiyu
 
 装上之后会多出 13 个原生工具（`xfy_memory_*`），数据默认落在 `~/.dsh/xiaofeiyu-memory/data`，
 路径可以在插件配置 `root` 里改，也可以用环境变量 `XFY_MEMORY_ROOT`。
+
+宿主带 `webServer` 时插件还会挂 `/xfy-memory`（HTTP API + 看板静态页），并把 `lib/client.js` 作为**原生 React 面板**注册到右侧栏与会话头按钮——不需要额外开服务。两半端的细节见 [docs/DSH-PLUGIN.md](docs/DSH-PLUGIN.md)。
 
 ### 作为独立命令行 / 服务（不装插件也能用）
 
@@ -101,8 +106,9 @@ node src/cli.mjs task end <taskId> --summary "一句话结果" --md "## 做了�
 ## 目录结构
 
 ```
-index.js            插件 host 半端（注册 xfy_memory_* 工具）
+index.js            插件 host 半端（注册 xfy_memory_* 工具 + /xfy-memory 路由 + 闭环钩子）
 lib/hostdeps.mjs    从宿主树里取 schemastery / defineTool，取不到就本地等价实现
+lib/client.js       插件 client 半端：DSH 右侧栏原生 React 面板（__ModuleLoader__ 包裹）
 cordis.patch.yml    插件挂载点
 src/db.mjs          SQLite schema + 影子日志 + 备份 + 配置
 src/engine.mjs      分词、遗忘曲线、remember/recall/feedback、休眠清理、附件
@@ -115,7 +121,8 @@ src/tools.mjs       search/digest/explain/link/expand/pin/health/dedupe/summariz
 src/server.mjs      HTTP API + 静态看板
 src/cli.mjs         命令行
 web/index.html      看板（单文件内联）
-tests/run-tests.mjs 129 个断言
+docs/DSH-PLUGIN.md   插件形态说明（两半端、槽位、安装与验证）
+tests/run-tests.mjs 148 个断言
 ```
 
 ## 参数（都能在看板里改，`updateConfig` 会按合理区间夹紧）
@@ -130,6 +137,8 @@ tests/run-tests.mjs 129 个断言
 | `recall.detail` / `indexBodyChars` | index / 90 | 默认只给前 90 字正文（省 token） |
 | `guard.contextWarnTokens` / `contextBlockTokens` | 120000 / 200000 | 硬阈值 |
 | `vector.vectorWeight` / `vectorFloor` / `fpWeight` | 0.6 / 0.15 / 1.5 | 向量融合与语义指纹权重 |
+| `curve.adaptive` | true | FSRS 式复习：命中降难度抬间隔，遗忘乘 0.45 |
+| `curve.trunkFloor` / `trunkBoostGrowth` / `trunkBoostMax` | 0.55 / 1.35 / 4 | 主干留存地板与强化上限 |
 | `lifecycle.recycleDays` | 30 | 回收站保留天数 |
 
 ## 已知边界（不吹牛）
@@ -143,12 +152,13 @@ tests/run-tests.mjs 129 个断言
 ## 测试
 
 ```bash
-node tests/run-tests.mjs    # 通过 129 / 失败 0
+node tests/run-tests.mjs    # 通过 148 / 失败 0
 node tests/plugin-smoke.mjs # 插件形态冒烟：13 个工具真实注册并逐个调用（11 项全 PASS）
 ```
 
 覆盖：分区隔离、去重、index/full 两种召回、遗忘曲线与反馈、守卫硬阈值、汇报写删恢复清理、导入导出、
-影子日志重建、附件与描述、向量惰性补齐、语义指纹、HTTP 集成、CLI 回归，以及 8 个新工具的边界（跨分区拒绝、悬空关联修复…）。
+影子日志重建、附件与描述、向量惰性补齐、语义指纹、HTTP 集成、CLI 回归、8 个新工具的边界（跨分区拒绝、悬空关联修复…），
+以及自适应曲线（主干地板 vs 普通指数、FSRS 复习、主干强化、曲线预测不破地板）、相近合并、收尾自动归档主干、检索评测、健康日报、静态站点导出。
 
 ## License
 

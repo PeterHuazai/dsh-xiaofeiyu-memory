@@ -465,6 +465,55 @@ ok(onlyReports.items.length === 0 && onlyReports.reports.length >= 1, 'include �
 const withGuards = tasks.exportBundle(store, { partition: 'p-tools', withGuardEvents: true });
 ok(Array.isArray(withGuards.guardEvents) && withGuards.guardEvents.length >= 1, 'withGuardEvents 导出守卫记录', withGuards.guardEvents.length);
 ok(Array.isArray(withGuards.guardEvents[0].reasons), '守卫记录 reasons 已解析成数组');
+
+// 35 自适应曲线：FSRS 复习 + 主干强化 + 曲线地板
+const adp2 = engine.ensurePartition(store, { name: 'p-adaptive', title: '自适应曲线' });
+const plain = engine.remember(store, { partition: 'p-adaptive', title: '普通条目：接口约定', body: '接口一律返回 json', importance: 2 }).item;
+const trunkSeed = engine.remember(store, { partition: 'p-adaptive', title: '主干条目：架构决定', body: '存储用 sqlite + 影子日志', importance: 5, pinned: true }).item;
+const rBefore = engine.retentionOf(store.db.prepare('SELECT * FROM item WHERE id = ?').get(trunkSeed.id), Date.now() + 400 * 86400000, store.config);
+const rPlain = engine.retentionOf(store.db.prepare('SELECT * FROM item WHERE id = ?').get(plain.id), Date.now() + 400 * 86400000, store.config);
+ok(rBefore > 0.5 && rPlain < 0.01, '主干有留存地板、普通条目纯指数衰减', { trunk: rBefore, plain: rPlain });
+const rec = engine.recall(store, { partition: 'p-adaptive', query: '接口约定', detail: 'full' });
+const fbUsed = engine.feedback(store, { eventId: rec.eventId, used: 1 });
+ok(fbUsed.affected === 1, 'feedback 命中后影响 1 条', fbUsed);
+const afterUsed = store.db.prepare('SELECT * FROM item WHERE id = ?').get(plain.id);
+ok(Number(afterUsed.reviews) >= 1 && Number(afterUsed.hit_count) >= 1, '命中累加 reviews/hit_count', { reviews: afterUsed.reviews, hits: afterUsed.hit_count });
+ok(Number(afterUsed.difficulty) < 5, '命中让难度下降（FSRS）', afterUsed.difficulty);
+const rein = engine.reinforce(store, { id: trunkSeed.id, strength: 1.5 });
+ok(rein.after.boost > 1 && rein.after.stability > rein.before.stability, '强化同时抬稳定度与强化系数', { before: rein.before, after: rein.after });
+const fc = engine.projectCurve(store.db.prepare('SELECT * FROM item WHERE id = ?').get(trunkSeed.id), store.config, 90);
+ok(fc.trunk === true && fc.points.length > 10 && fc.points[fc.points.length - 1].retention >= fc.floor - 0.001, '预测曲线不跌破主干地板', { last: fc.points[fc.points.length - 1], floor: fc.floor });
+const trunkList = engine.trunkSnapshot(store, adp2.id);
+ok(trunkList.length === 1 && trunkList[0].id === trunkSeed.id, '主干快照只列主干', trunkList.map(function (x) { return x.id; }));
+
+// 36 相近合并：默认预演、apply 后成员归档并挂 superseded_by
+engine.remember(store, { partition: 'p-adaptive', title: '合并候选：看板截图归档位置', body: '截图放 docs/screenshots', importance: 3 });
+engine.remember(store, { partition: 'p-adaptive', title: '合并候选：看板截图归档位置说明', body: '截图放 docs/screenshots 目录下', importance: 3 });
+const mgDry = engine.mergeSimilar(store, { partitionId: adp2.id, threshold: 0.5 });
+ok(mgDry.dryRun === true && mgDry.groups.length >= 1, '默认只预演', { groups: mgDry.groups.length });
+const grp = mgDry.groups[0];
+ok(grp.members.length >= 1 && grp.members[0].score !== null, '组内成员带相似度分数', grp.members);
+const mgApply = engine.mergeSimilar(store, { partitionId: adp2.id, threshold: 0.5, apply: true });
+ok(mgApply.merged >= 1, 'apply 真的合并了成员', mgApply.merged);
+const mergedRow = store.db.prepare('SELECT * FROM item WHERE id = ?').get(grp.members[0].id);
+ok(mergedRow.state === 'archived' && mergedRow.superseded_by === grp.keeper.id, '被并入的条目归档并指向保留者', { state: mergedRow.state, sup: mergedRow.superseded_by });
+
+// 37 收尾归档主干 + 检索评测 + 健康日报 + 静态站点
+const archTask = tasks.startTask(store, { partition: 'p-adaptive', title: '归档主干测试' });
+const ended2 = tasks.endTask(store, { id: archTask.task.id, summary: '做完一件事', markdown: '## 做了什么\n- 验证收尾闭环' });
+ok(!!ended2.trunk && ended2.trunk.consolidated >= 1, 'endTask 自动归档主干', ended2.trunk);
+ok(!!ended2.swept && Array.isArray(ended2.swept.changed), 'endTask 顺带 sweep', ended2.swept && ended2.swept.changed);
+const trunkRow2 = store.db.prepare("SELECT * FROM item WHERE partition_id = ? AND kind = 'trunk'").get(adp2.id);
+ok(!!trunkRow2 && String(trunkRow2.body).indexOf('归档主干测试') >= 0, '主干条目里写进了这次收尾', trunkRow2 && String(trunkRow2.body).slice(0, 80));
+const evr = engine.evalRetrieval(store, { partitionId: adp2.id, topK: 3 });
+ok(evr.variants.length === 3 && evr.variants.every(function (v) { return typeof v.mrr === 'number'; }), '评测返回三种变体与 MRR', evr.variants.map(function (v) { return v.name; }));
+const daily = tasks.healthReport(store, { partition: 'p-adaptive', dir: TMP });
+ok(daily.markdown.indexOf('记忆健康日报') >= 0 && daily.markdown.indexOf('## p-adaptive') >= 0, '健康日报含分区小节', daily.markdown.slice(0, 80));
+ok(!!daily.path && fs.existsSync(daily.path), '健康日报落盘成 markdown 文件', daily.path);
+const site = tasks.exportSite(store, { partition: 'p-adaptive', dir: path.join(TMP, 'site') });
+ok(fs.existsSync(path.join(site.dir, 'index.html')) && site.files.length >= 2, '静态站点导出 index.html + 分区 md', site.files);
+const siteHtml = fs.readFileSync(path.join(site.dir, 'index.html'), 'utf8');
+ok(siteHtml.indexOf('<table>') >= 0 && siteHtml.indexOf('p-adaptive') >= 0, '站点 html 含分区与条目表');
 console.log('\n通过 ' + pass + ' / 失败 ' + fail);
 if (fail) { console.log(failures.join('\n')); process.exit(1); }
 // Windows 上数据库句柄未关时删不掉临时目录

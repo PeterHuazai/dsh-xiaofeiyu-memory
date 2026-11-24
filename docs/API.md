@@ -25,6 +25,11 @@ Base: http://127.0.0.1:8787   全部返回 JSON（除静态文件与附件二进
 | GET | /api/attachment?id= | 原始图片字节 |
 | GET | /api/export?partition=&withEvents=1&withGuardEvents=0&withConfig=0&include=items,tasks,reports,events,guardEvents | bundle JSON（`include` 逗号清单控制范围，空数组表示未导出） |
 | GET | /api/harness/scan?root= | {root, exists, projects:[{dir,cwd,name,partition,sessionCount,importedCount,sessions[{id,title,createdAt,updatedAt,firstUser,lastAssistant,turns,toolCalls,bytes,empty,imported,file}]}], totals:{projects,sessions,imported}} |
+| GET | /api/trunk?partition= | {partition, partitionId, items:[{id,title,kind,importance,pinned,stability,boost,effectiveStability,retention,reviews,lapses,difficulty,last_review_at}]} 主干快照 |
+| GET | /api/curve/forecast?id=&days= | {item,id,title,stability,baseStability,boost,trunk,floor,points[{day,retention}]} 主干曲线带留存地板 |
+| GET | /api/merge?partition=&threshold= | {dryRun:true,threshold,candidates,groups[{keeper,members[{id,title,score}]}],merged} 相近合并预演 |
+| GET | /api/eval?partition=&topK=&limit= | {partition,topK,queries,variants[{name:current|keyword-only|vector-heavy,queries,hitRate,mrr,avgTokens}]} |
+| GET | /api/health/report?partition=&days= | {markdown,path,totals,hitRate,days,partition,findings}（markdown 同时落 data/reports/） |
 | GET | /api/vector/status | {enabled,dims,model,items,covered,vectorWeight,vectorFloor,fpWeight,backend:{configured,sqliteVecAvailable,effective,extensionPath,extensionVersion,indexDims,indexed,error},provider{...},deepseek{enabled,model,apiKeyPresent,ready}} |
 
 ### state 结构（看板主数据源）
@@ -36,7 +41,8 @@ Base: http://127.0.0.1:8787   全部返回 JSON（除静态文件与附件二进
 ### item 字段
 id, partition_id, kind, title, body, tags[], importance, pinned, state(active|dormant|archived|deleted),
 stability, created_at, updated_at, last_access_at, access_count, hit_count, redundant_reads,
-content_hash, source, task_id, superseded_by, deleted_at, delete_reason, retention
+content_hash, source, task_id, superseded_by, deleted_at, delete_reason, retention,
+difficulty, reviews, lapses, last_review_at, boost, boost_at
 
 ### recall_event
 id, partition_id, task_id, session_id, query, ts, returned, used(null|0|1), top_score, items(JSON 字符串), redundant, latency_ms
@@ -80,6 +86,10 @@ id, partition_id, task_id, ts, level(info|ok|warn|block), score, reasons(JSON �
 | POST | /api/task/end | {taskId, summary, markdown, partition} |
 | POST | /api/task/report | {partition, taskId, title, summary, markdown} |
 | POST | /api/import | {bundle:{format:'xiaofeiyu-memory-bundle',...}} |
+| POST | /api/reinforce | {id, strength?} → {item, before{stability,boost}, after{stability,boost}, growth, reason} |
+| POST | /api/merge | {partition, apply:true, threshold?, maxGroups?} → 合并结果（成员 archived 且 superseded_by=keeper） |
+| POST | /api/trunk/archive | {partition, taskId?, title?, summary?, strength?} → {partition,itemId,created,consolidated,boost} |
+| POST | /api/site/export | {partition?, dir?, title?} → {dir, files[], partitions, reports, bytes} 静态站点 |
 | PUT | /api/config | 部分配置对象（深合并，越界自动夹紧） |
 
 ### guard/check 返回
@@ -88,6 +98,10 @@ id, partition_id, task_id, ts, level(info|ok|warn|block), score, reasons(JSON �
   metrics:{estTokens,events,hits,redundantEvents}, reasons[], action:'continue'|'consolidate'|'hard-stop',
   directive, trunk:[{id,title,kind,importance,retention}], thresholds:{warn,block} }
 ```
+
+## 插件形态下的路径
+
+装进 DSH 后同一套路由挂在宿主上，前缀换成 `/xfy-memory`：`GET /xfy-memory/api/state?partition=`。字段完全一致，静态看板在 `/xfy-memory/`。
 
 ## 检索与自检（src/tools.mjs）
 
@@ -107,6 +121,7 @@ id, partition_id, task_id, ts, level(info|ok|warn|block), score, reasons(JSON �
 
 ## 配置键（可微调，网页里要能改）
 curve.stabilityBaseDays / stabilityGrowth / readGrowth / forgetThreshold / archiveThreshold / trunkImportance / displayDays
+curve.adaptive / difficultyInit / difficultyMin / difficultyMax / difficultyStep / successFactorMin / successFactorMax / lapseFactor / trunkFloor / trunkBoostGrowth / trunkBoostMax / trunkBoostDecayDays / reinforceGrowth
 recall.detail(index|full|auto) / indexBodyChars / topK / minScore / redundancyWindowMin / maxRepeatReads
 guard.contextWarnTokens / contextBlockTokens / hitRateFloor / hitRateWindow / staleShareCeiling / warnScore / blockScore / weights.{context,hitRate,redundancy,stale}
 lifecycle.recycleDays

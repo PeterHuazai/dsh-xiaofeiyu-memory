@@ -9,19 +9,23 @@
 import { loadHostDeps } from './lib/hostdeps.mjs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const hostDeps = await loadHostDeps()
 const z = hostDeps.z
 const defineTool = hostDeps.defineTool
 
 export const name = 'xiaofeiyu-memory'
-export const inject = ['tools']
+// webServer 只在 Web/桌面版存在，CLI profile 里没有；声明成 optional 才不会把工具注册也拖死
+export const inject = { required: ['tools'], optional: ['webServer'] }
 
 export const Config = !z ? undefined : z.object({
   /** 记忆库根目录（其下就是 data/、web/）。留空 = ~/.dsh/xiaofeiyu-memory */
   root: z.string().default('').extra('volatile', true),
   /** 不给 partition 时用哪个分区（建议显式传，别依赖这个） */
-  defaultPartition: z.string().default('').extra('volatile', true)
+  defaultPartition: z.string().default('').extra('volatile', true),
+  /** 回合结束自动清扫休眠/归档（写操作，默认关） */
+  autoSweep: z.boolean().default(false).extra('volatile', true)
 })
 
 const cache = { root: '', store: null, api: null }
@@ -355,4 +359,83 @@ export function apply(ctx, config) {
       return r
     }
   })
+
+  // ======================= Web 半端 + 闭环钩子（可选） =======================
+  // 宿主给进来的 ctx 没有 .inject()/apply(root) 那一套；能用的注册面就是 tools / webServer / on。
+  const disposers = []
+  const keep = (fn) => {
+    try { const d = fn(); if (typeof d === 'function') disposers.push(d) } catch (err) { /* 这个 profile 没有该能力，跳过 */ }
+  }
+
+  keep(() => {
+    const ws = ctx.webServer
+    if (!ws || typeof ws.register !== 'function') return undefined
+    return ws.register({
+      kind: 'prefix',
+      path: '/xfy-memory',
+      handler: async (req, res) => {
+        try {
+          const api = await load(config)
+          if (!api.web) {
+            const srv = await import('./src/server.mjs')
+            api.web = { routes: srv.createRoutes(api.store), dispatch: srv.dispatchRequest, webDir: join(fileURLToPath(new URL('.', import.meta.url)), 'web') }
+          }
+          const raw = String(req.url || '/')
+          const cut = raw.indexOf('/xfy-memory')
+          let rest = cut >= 0 ? raw.slice(cut + '/xfy-memory'.length) : raw
+          if (!rest) rest = '/'
+          if (rest.charAt(0) !== '/') rest = '/' + rest
+          req.url = rest
+          return await api.web.dispatch(api.web.routes, api.store, req, res, { webDir: api.web.webDir })
+        } catch (err) {
+          const msg = String((err && err.message) || err)
+          try { res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ error: msg })) } catch (e) {}
+        }
+      }
+    })
+  })
+
+  keep(() => {
+    if (typeof ctx.on !== 'function') return undefined
+    const on = (name, fn) => {
+      try {
+        const off = ctx.on(name, function (payload) { try { return fn(payload || {}) } catch (err) { return undefined } })
+        if (typeof off === 'function') return off
+      } catch (err) {}
+      return undefined
+    }
+    const offs = []
+    const partitionOf = (payload) => String((payload && payload.partition) || (config && config.defaultPartition) || '').trim()
+    const tokensOf = (payload) => {
+      const c = [payload && payload.tokens, payload && payload.contextTokens, payload && payload.usage && payload.usage.total_tokens, payload && payload.context && payload.context.tokens];
+      for (const v of c) { const n = Number(v); if (Number.isFinite(n) && n > 0) return n; }
+      return 0;
+    };
+
+    // 上下文压力自动记一条守卫事件（只写日志，不拦 agent；拦不拦由工具里的 guard 决定）
+    const preStep = on('agent/pre-step', async (payload) => {
+      const part = partitionOf(payload)
+      const tokens = tokensOf(payload)
+      if (!part || !tokens) return undefined
+      const api = await load(config)
+      await api.guard.checkGuard(api.store, { partition: part, contextTokens: tokens, source: 'auto' })
+      return undefined
+    })
+    if (preStep) offs.push(preStep)
+
+    // 回合结束：可选自动清扫（默认关，写操作要用户点头才开）
+    const turnStop = on('agent/turn-stopping', async (payload) => {
+      if (!(config && config.autoSweep)) return undefined
+      const part = partitionOf(payload)
+      if (!part) return undefined
+      const api = await load(config)
+      api.engine.sweep(api.store, { partitionId: api.engine.partitionByName(api.store, part).id })
+      return undefined
+    })
+    if (turnStop) offs.push(turnStop)
+
+    return () => { for (const off of offs) { try { off() } catch (err) {} } }
+  })
+
+  return () => { for (const d of disposers) { try { d() } catch (err) {} } }
 }

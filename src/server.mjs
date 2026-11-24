@@ -1,6 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { openStore, backup, integrity, listBackups } from './db.mjs';
 import * as engine from './engine.mjs';
 import * as tasks from './tasks.mjs';
@@ -10,8 +11,7 @@ import * as vision from './vision.mjs';
 import * as vector from './vector.mjs';
 import * as tools from './tools.mjs';
 
-const store = openStore({});
-const WEB = path.join(store.root, 'web');
+function webDirOf(store) { return path.join(store.root, 'web'); }
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -89,17 +89,17 @@ function q(url, key, fallback) {
   return v === null ? fallback : v;
 }
 
-function partIdOf(name) {
+function partIdOf(store, name) {
   if (!name) return null;
   const row = store.db.prepare('SELECT id FROM partition WHERE name = ?').get(String(name));
   return row ? row.id : null;
 }
 
-function stateBundle(partition) {
+function stateBundle(store, partition) {
   const overview = engine.overview(store);
-  const pid = partIdOf(partition);
+  const pid = partIdOf(store, partition);
   const target = partition || (overview.partitions[0] && overview.partitions[0].name) || null;
-  const tid = partIdOf(target);
+  const tid = partIdOf(store, target);
   const items = tid ? engine.itemList(store, tid, { limit: 400 }) : [];
   const events = store.db.prepare('SELECT id, partition_id, task_id, query, ts, returned, used, top_score, items, redundant FROM recall_event ' + (tid ? 'WHERE partition_id = ? ' : '') + 'ORDER BY ts DESC LIMIT 60')
     .all.apply(store.db.prepare('SELECT id, partition_id, task_id, query, ts, returned, used, top_score, items, redundant FROM recall_event ' + (tid ? 'WHERE partition_id = ? ' : '') + 'ORDER BY ts DESC LIMIT 60'), tid ? [tid] : []);
@@ -124,16 +124,17 @@ function stateBundle(partition) {
   };
 }
 
-const routes = {
+export function createRoutes(store) {
+  return {
   'GET /api/health': function () {
     return { ok: true, service: 'xiaofeiyu-memory', version: 1, root: store.root, integrity: integrity(store), shadow: store.shadow.size(), now: Date.now() };
   },
-  'GET /api/state': function (ctx) { return stateBundle(ctx.url.searchParams.get('partition')); },
+  'GET /api/state': function (ctx) { return stateBundle(store, ctx.url.searchParams.get('partition')); },
   'GET /api/overview': function () { return engine.overview(store); },
   'GET /api/config': function () { return store.config; },
   'GET /api/partitions': function () { return { partitions: engine.listPartitions(store) }; },
   'GET /api/items': function (ctx) {
-    const pid = partIdOf(q(ctx.url, 'partition', ''));
+    const pid = partIdOf(store, q(ctx.url, 'partition', ''));
     if (!pid) throw new Error('unknown partition');
     return { items: engine.itemList(store, pid, { limit: Number(q(ctx.url, 'limit', 500)), includeArchived: q(ctx.url, 'includeArchived', '') === '1' }) };
   },
@@ -144,9 +145,9 @@ const routes = {
     if (id) return engine.projectCurve(store.db.prepare('SELECT * FROM item WHERE id = ?').get(String(id)), store.config, days);
     return engine.projectCurve({ id: 'baseline', stability: store.config.curve.stabilityBaseDays, last_access_at: Date.now() }, store.config, days);
   },
-  'GET /api/timeline': function (ctx) { return { points: engine.timeline(store, partIdOf(q(ctx.url, 'partition', '')), Number(q(ctx.url, 'days', 30))) }; },
+  'GET /api/timeline': function (ctx) { return { points: engine.timeline(store, partIdOf(store, q(ctx.url, 'partition', '')), Number(q(ctx.url, 'days', 30))) }; },
   'GET /api/events': function (ctx) {
-    const pid = partIdOf(q(ctx.url, 'partition', ''));
+    const pid = partIdOf(store, q(ctx.url, 'partition', ''));
     const limit = Number(q(ctx.url, 'limit', 100));
     const sql = 'SELECT * FROM recall_event ' + (pid ? 'WHERE partition_id = ? ' : '') + 'ORDER BY ts DESC LIMIT ?';
     const stmt = store.db.prepare(sql);
@@ -154,7 +155,7 @@ const routes = {
   },
   'GET /api/guard/events': function (ctx) {
     return listGuardEvents(store, {
-      partitionId: partIdOf(q(ctx.url, 'partition', '')),
+      partitionId: partIdOf(store, q(ctx.url, 'partition', '')),
       level: q(ctx.url, 'level', 'all'),
       source: q(ctx.url, 'source', 'all'),
       deleted: q(ctx.url, 'deleted', '') === '1',
@@ -171,12 +172,12 @@ const routes = {
   'GET /api/harness/scan': function (ctx) { return harness.scanHarness(store, { root: q(ctx.url, 'root', '') || null }); },
   'POST /api/harness/import': function (ctx) { return harness.importHarness(store, ctx.body); },
   'GET /api/audit': function (ctx) { return audit(store, { partition: q(ctx.url, 'partition', '') || null, hours: Number(q(ctx.url, 'hours', 168)) }); },
-  'GET /api/recycle': function (ctx) { return { items: engine.listRecycle(store, partIdOf(q(ctx.url, 'partition', ''))) }; },
+  'GET /api/recycle': function (ctx) { return { items: engine.listRecycle(store, partIdOf(store, q(ctx.url, 'partition', ''))) }; },
   'GET /api/reports': function (ctx) {
     if (q(ctx.url, 'trash', '') === '1') {
-      return { reports: tasks.listReports(store, { trash: true, partitionId: partIdOf(q(ctx.url, 'partition', '')), limit: Number(q(ctx.url, 'limit', 100)) }) };
+      return { reports: tasks.listReports(store, { trash: true, partitionId: partIdOf(store, q(ctx.url, 'partition', '')), limit: Number(q(ctx.url, 'limit', 100)) }) };
     }
-    const pid = partIdOf(q(ctx.url, 'partition', ''));
+    const pid = partIdOf(store, q(ctx.url, 'partition', ''));
     const sql = 'SELECT r.*, p.name AS partition FROM report r JOIN partition p ON p.id = r.partition_id ' + (pid ? 'WHERE r.partition_id = ? AND r.deleted_at IS NULL ' : 'WHERE r.deleted_at IS NULL ') + 'ORDER BY r.created_at DESC LIMIT 200';
     const stmt = store.db.prepare(sql);
     return { reports: stmt.all.apply(stmt, pid ? [pid] : []) };
@@ -227,7 +228,7 @@ const routes = {
   'POST /api/report/delete': function (ctx) { return tasks.deleteReport(store, { id: ctx.body.id, path: ctx.body.path, reason: ctx.body.reason }); },
   'POST /api/report/restore': function (ctx) { return tasks.restoreReport(store, { id: ctx.body.id, path: ctx.body.path }); },
   'POST /api/report/purge': function (ctx) { return tasks.purgeReports(store, { id: ctx.body.id, path: ctx.body.path, olderThanDays: ctx.body.olderThanDays }); },
-  'GET /api/caption/status': function (ctx) { return vision.captionStatus(store, { partitionId: partIdOf(q(ctx.url, 'partition', '')) }); },
+  'GET /api/caption/status': function (ctx) { return vision.captionStatus(store, { partitionId: partIdOf(store, q(ctx.url, 'partition', '')) }); },
   'POST /api/caption/batch': async function (ctx) {
     const part = ctx.body.partition ? engine.partitionByName(store, ctx.body.partition) : null;
     if (ctx.body.partition && !part) throw new Error('unknown partition');
@@ -271,10 +272,40 @@ const routes = {
     if (!part) throw new Error('unknown partition');
     return tools.summarize(store, { partition: part.name, limit: ctx.body.limit, title: ctx.body.title, taskId: ctx.body.taskId });
   },
+  'GET /api/trunk': function (ctx) {
+    const part = engine.partitionByName(store, q(ctx.url, 'partition', ''));
+    return { partition: part.name, partitionId: part.id, items: engine.trunkSnapshot(store, part.id) };
+  },
+  'GET /api/curve/forecast': function (ctx) {
+    const id = String(q(ctx.url, 'id', '') || '');
+    const days = Math.max(7, Math.min(3650, Number(q(ctx.url, 'days', 90)) || 90));
+    const row = id ? store.db.prepare('SELECT * FROM item WHERE id = ?').get(id) : null;
+    if (!row) throw new Error('unknown item: ' + id);
+    return engine.projectCurve(row, store.config, days);
+  },
+  'POST /api/reinforce': function (ctx) { return engine.reinforce(store, ctx.body || {}); },
+  'GET /api/merge': function (ctx) {
+    const part = engine.partitionByName(store, q(ctx.url, 'partition', ''));
+    return engine.mergeSimilar(store, { partitionId: part.id, threshold: q(ctx.url, 'threshold', 0.6), apply: false });
+  },
+  'POST /api/merge': function (ctx) {
+    const body = ctx.body || {};
+    const part = engine.partitionByName(store, body.partition || '');
+    return engine.mergeSimilar(store, { partitionId: part.id, threshold: body.threshold, apply: body.apply === true, maxGroups: body.maxGroups });
+  },
+  'POST /api/trunk/archive': function (ctx) { return engine.archiveTrunk(store, ctx.body || {}); },
+  'GET /api/eval': function (ctx) {
+    const part = engine.partitionByName(store, q(ctx.url, 'partition', ''));
+    return engine.evalRetrieval(store, { partitionId: part.id, partition: part.name, topK: q(ctx.url, 'topK', 5), limit: q(ctx.url, 'limit', 40) });
+  },
+  'GET /api/health/report': function (ctx) { return tasks.healthReport(store, { partition: q(ctx.url, 'partition', ''), days: q(ctx.url, 'days', 7) }); },
+  'POST /api/site/export': function (ctx) { return tasks.exportSite(store, ctx.body || {}); },
   'PUT /api/config': function (ctx) { return tasks.updateConfig(store, ctx.body); }
 };
+}
 
-const server = http.createServer(async function (req, res) {
+export async function dispatchRequest(routes, store, req, res, opts) {
+  const WEB = (opts && opts.webDir) || webDirOf(store);
   if (req.method === 'OPTIONS') return send(res, 204, '');
   const url = new URL(req.url, 'http://localhost');
   const key = req.method + ' ' + url.pathname;
@@ -298,8 +329,16 @@ const server = http.createServer(async function (req, res) {
   } catch (err) {
     return send(res, 400, { error: String(err && err.message ? err.message : err) });
   }
-});
+}
 
+function isMain() {
+  try { return !!process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url)); } catch (err) { return false; }
+}
+
+if (isMain()) {
+const store = openStore({});
+const routes = createRoutes(store);
+const server = http.createServer(function (req, res) { return dispatchRequest(routes, store, req, res); });
 const port = Number(argOf('port', process.env.MEMORY_PORT || store.config.server.port || 8787));
 const host = String(argOf('host', store.config.server.host || '127.0.0.1'));
 server.listen(port, host, function () {
@@ -308,3 +347,4 @@ server.listen(port, host, function () {
   try { fs.writeFileSync(path.join(store.paths.dataDir, 'server.json'), JSON.stringify({ pid: process.pid, host: host, port: port, startedAt: Date.now() }, null, 2)); } catch (err) {}
 });
 process.on('SIGINT', function () { try { backup(store); } catch (err) {} process.exit(0); });
+}

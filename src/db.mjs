@@ -17,7 +17,20 @@ export const DEFAULT_CONFIG = {
     forgetThreshold: 0.25,
     archiveThreshold: 0.02,
     trunkImportance: 4,
-    displayDays: 120
+    displayDays: 120,
+    adaptive: true,
+    difficultyInit: 5,
+    difficultyMin: 1,
+    difficultyMax: 10,
+    difficultyStep: 0.35,
+    successFactorMin: 1.15,
+    successFactorMax: 2.6,
+    lapseFactor: 0.45,
+    trunkFloor: 0.55,
+    trunkBoostGrowth: 1.35,
+    trunkBoostMax: 4,
+    trunkBoostDecayDays: 30,
+    reinforceGrowth: 1.2
   },
   recall: {
     detail: 'index',
@@ -93,7 +106,13 @@ const SCHEMA = [
   "  task_id TEXT,",
   "  superseded_by TEXT,",
   "  deleted_at INTEGER,",
-  "  delete_reason TEXT",
+  "  delete_reason TEXT,",
+  "  difficulty REAL NOT NULL DEFAULT 5,",
+  "  reviews INTEGER NOT NULL DEFAULT 0,",
+  "  lapses INTEGER NOT NULL DEFAULT 0,",
+  "  last_review_at INTEGER,",
+  "  boost REAL NOT NULL DEFAULT 1,",
+  "  boost_at INTEGER",
   ");",
   "CREATE INDEX IF NOT EXISTS item_partition ON item(partition_id, state);",
   "CREATE INDEX IF NOT EXISTS item_hash ON item(partition_id, content_hash);",
@@ -292,6 +311,8 @@ export function migrate(db) {
   const cols = columns(db, 'item');
   if (cols.length && cols.indexOf('deleted_at') < 0) { try { db.exec('ALTER TABLE item ADD COLUMN deleted_at INTEGER'); } catch (err) {} }
   if (cols.length && cols.indexOf('delete_reason') < 0) { try { db.exec('ALTER TABLE item ADD COLUMN delete_reason TEXT'); } catch (err) {} }
+  const addCols = [['difficulty', 'REAL NOT NULL DEFAULT 5'], ['reviews', 'INTEGER NOT NULL DEFAULT 0'], ['lapses', 'INTEGER NOT NULL DEFAULT 0'], ['last_review_at', 'INTEGER'], ['boost', 'REAL NOT NULL DEFAULT 1'], ['boost_at', 'INTEGER']];
+  for (const ac of addCols) { if (cols.length && cols.indexOf(ac[0]) < 0) { try { db.exec('ALTER TABLE item ADD COLUMN ' + ac[0] + ' ' + ac[1]); } catch (err) { /* ignore */ } } }
   const rcols = columns(db, 'report');
   if (rcols.length && rcols.indexOf('deleted_at') < 0) { try { db.exec('ALTER TABLE report ADD COLUMN deleted_at INTEGER'); } catch (err) {} }
   if (rcols.length && rcols.indexOf('trash_path') < 0) { try { db.exec('ALTER TABLE report ADD COLUMN trash_path TEXT'); } catch (err) {} }
@@ -373,7 +394,7 @@ export function listBackups(store) {
 
 const REPLAYABLE = {
   partition: 'INSERT OR REPLACE INTO partition (id, name, title, description, created_at, archived) VALUES (?, ?, ?, ?, ?, ?)',
-  item: 'INSERT OR REPLACE INTO item (id, partition_id, kind, title, body, tags, importance, pinned, state, stability, created_at, updated_at, last_access_at, access_count, hit_count, redundant_reads, content_hash, source, task_id, superseded_by, deleted_at, delete_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+  item: 'INSERT OR REPLACE INTO item (id, partition_id, kind, title, body, tags, importance, pinned, state, stability, created_at, updated_at, last_access_at, access_count, hit_count, redundant_reads, content_hash, source, task_id, superseded_by, deleted_at, delete_reason, difficulty, reviews, lapses, last_review_at, boost, boost_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 5), COALESCE(?, 0), COALESCE(?, 0), ?, COALESCE(?, 1), ?)',
   recall_event: 'INSERT OR REPLACE INTO recall_event (id, partition_id, task_id, session_id, query, ts, returned, used, top_score, items, redundant, latency_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   task: 'INSERT OR REPLACE INTO task (id, partition_id, title, status, started_at, ended_at, context_tokens, report_path, summary, log) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   report: 'INSERT OR REPLACE INTO report (id, task_id, partition_id, title, path, summary, tokens, created_at, deleted_at, trash_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -384,7 +405,7 @@ const REPLAYABLE = {
 
 export const REPLAY_COLUMNS = {
   partition: ['id', 'name', 'title', 'description', 'created_at', 'archived'],
-  item: ['id', 'partition_id', 'kind', 'title', 'body', 'tags', 'importance', 'pinned', 'state', 'stability', 'created_at', 'updated_at', 'last_access_at', 'access_count', 'hit_count', 'redundant_reads', 'content_hash', 'source', 'task_id', 'superseded_by', 'deleted_at', 'delete_reason'],
+  item: ['id', 'partition_id', 'kind', 'title', 'body', 'tags', 'importance', 'pinned', 'state', 'stability', 'created_at', 'updated_at', 'last_access_at', 'access_count', 'hit_count', 'redundant_reads', 'content_hash', 'source', 'task_id', 'superseded_by', 'deleted_at', 'delete_reason', 'difficulty', 'reviews', 'lapses', 'last_review_at', 'boost', 'boost_at'],
   recall_event: ['id', 'partition_id', 'task_id', 'session_id', 'query', 'ts', 'returned', 'used', 'top_score', 'items', 'redundant', 'latency_ms'],
   task: ['id', 'partition_id', 'title', 'status', 'started_at', 'ended_at', 'context_tokens', 'report_path', 'summary', 'log'],
   report: ['id', 'task_id', 'partition_id', 'title', 'path', 'summary', 'tokens', 'created_at', 'deleted_at', 'trash_path'],

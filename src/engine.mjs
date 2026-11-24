@@ -69,26 +69,61 @@ export function etaMs(chars, cfg) {
   return Math.round(Number(chars || 0) / ratio);
 }
 
-// ---- forgetting curve ----
-export function retentionOf(item, now, cfg) {
-  const c = (cfg && cfg.curve) || {};
+// ---- forgetting curve（自适应 + 主干强化）----
+function curveCfg(cfg) { return (cfg && cfg.curve) || {}; }
+
+export function isTrunk(item, cfg) {
+  const c = curveCfg(cfg);
+  if (!item) return false;
+  return !!(item.pinned || Number(item.importance || 0) >= Number(c.trunkImportance || 4));
+}
+
+// 主干强化系数：每次成功调用/手工 reinforce 乘一把，随时间缓慢衰减回 1（不会一下归零）
+export function boostOf(item, cfg) {
+  const c = curveCfg(cfg);
+  const max = Math.max(1, Number(c.trunkBoostMax || 4));
+  const raw = Math.min(max, Math.max(1, Number((item && item.boost) || 1)));
+  const decayDays = Number(c.trunkBoostDecayDays || 30);
+  const at = Number((item && item.boost_at) || 0);
+  if (!at || !decayDays) return raw;
+  const days = Math.max(0, (nowMs() - at) / 86400000);
+  const decayed = 1 + (raw - 1) * Math.exp(-days / decayDays);
+  return Math.min(max, Math.max(1, decayed));
+}
+
+export function effectiveStability(item, cfg) {
+  const c = curveCfg(cfg);
   const s = Math.max(0.05, Number(item.stability || c.stabilityBaseDays || 7));
+  return isTrunk(item, cfg) ? s * boostOf(item, cfg) : s;
+}
+
+export function retentionOf(item, now, cfg) {
+  const c = curveCfg(cfg);
+  const s = effectiveStability(item, cfg);
   const last = Number(item.last_access_at || item.updated_at || item.created_at || now);
   const days = Math.max(0, (now - last) / 86400000);
-  return Math.exp(-days / s);
+  const base = Math.exp(-days / s);
+  if (!isTrunk(item, cfg)) return base;
+  // 主干曲线：有地板（trunkFloor），被冷落也只会降到地板附近，而不是无限趋零
+  const floor = Math.min(0.95, Math.max(0, Number(c.trunkFloor === undefined ? 0.55 : c.trunkFloor)));
+  return floor + (1 - floor) * base;
 }
 
 export function projectCurve(item, cfg, days) {
-  const c = (cfg && cfg.curve) || {};
+  const c = curveCfg(cfg);
   const span = Number(days || c.displayDays || 120);
-  const s = Math.max(0.05, Number(item.stability || c.stabilityBaseDays || 7));
+  const s = effectiveStability(item, cfg);
+  const trunk = isTrunk(item, cfg);
+  const floor = trunk ? Math.min(0.95, Math.max(0, Number(c.trunkFloor === undefined ? 0.55 : c.trunkFloor))) : 0;
   const last = Number(item.last_access_at || item.updated_at || item.created_at || nowMs());
   const pts = [];
-  for (let d = 0; d <= span; d += Math.max(1, Math.round(span / 60))) {
+  const step = Math.max(1, Math.round(span / 60));
+  for (let d = 0; d <= span; d += step) {
     const dt = (nowMs() - last) / 86400000 + d;
-    pts.push({ day: d, retention: Math.exp(-dt / s) });
+    const base = Math.exp(-dt / s);
+    pts.push({ day: d, retention: trunk ? floor + (1 - floor) * base : base });
   }
-  return { item: item.id, stability: s, points: pts };
+  return { item: item.id, id: item.id, title: String(item.title || ''), stability: Number(s.toFixed(3)), baseStability: Number(Number(item.stability || 0).toFixed(3)), boost: Number(boostOf(item, cfg).toFixed(3)), trunk: trunk, floor: floor, points: pts };
 }
 
 export function remember(store, input) {
@@ -338,6 +373,38 @@ export function recall(store, input) {
   };
 }
 
+// FSRS 式一遍复习：用对 → 稳定度按难度加成上升、难度下降；用错 → 稳定度跳水、难度上升；主干额外涨强化系数
+export function reviewItem(item, success, cfg) {
+  const c = curveCfg(cfg);
+  const maxS = Number(c.maxStabilityDays || 3650);
+  const dMin = Number(c.difficultyMin || 1);
+  const dMax = Number(c.difficultyMax || 10);
+  const now = nowMs();
+  let s = Math.max(0.5, Number(item.stability || c.stabilityBaseDays || 7));
+  let d = clamp(Number(item.difficulty === undefined || item.difficulty === null ? (c.difficultyInit || 5) : item.difficulty), dMin, dMax);
+  let boost = Math.max(1, Number(item.boost || 1));
+  let boostAt = Number(item.boost_at || 0);
+  const reviews = Number(item.reviews || 0) + 1;
+  let lapses = Number(item.lapses || 0);
+  const step = Number(c.difficultyStep || 0.35);
+  if (success) {
+    const ease = 1 - (d - dMin) / Math.max(0.001, dMax - dMin);
+    const lo = Number(c.successFactorMin || 1.15);
+    const hi = Number(c.successFactorMax || 2.6);
+    s = Math.min(maxS, s * (lo + (hi - lo) * ease));
+    d = Math.max(dMin, d - step);
+    if (isTrunk(item, cfg)) {
+      boost = Math.min(Number(c.trunkBoostMax || 4), boost * Number(c.trunkBoostGrowth || 1.35));
+      boostAt = now;
+    }
+  } else {
+    s = Math.max(0.5, s * Number(c.lapseFactor || 0.45));
+    d = Math.min(dMax, d + step);
+    lapses += 1;
+  }
+  return { stability: s, difficulty: d, reviews: reviews, lapses: lapses, boost: boost, boost_at: boostAt || now, last_review_at: now };
+}
+
 export function feedback(store, input) {
   const db = store.db;
   const ev = db.prepare('SELECT * FROM recall_event WHERE id = ?').get(String(input.eventId || ''));
@@ -346,18 +413,18 @@ export function feedback(store, input) {
   db.prepare('UPDATE recall_event SET used = ? WHERE id = ?').run(used, ev.id);
   store.shadow.append('recall_event', db.prepare('SELECT * FROM recall_event WHERE id = ?').get(ev.id));
   const cfg = store.config;
-  const maxS = Number(cfg.curve.maxStabilityDays || 3650);
   const ids = jsonParse(ev.items, []);
+  let affected = 0;
   for (const id of ids) {
-    if (used) {
-      db.prepare('UPDATE item SET hit_count = hit_count + 1, last_access_at = ?, stability = MIN(?, stability * (1 + ?)) WHERE id = ?')
-        .run(nowMs(), maxS, Number(cfg.curve.stabilityGrowth || 0.6), id);
-    } else {
-      db.prepare('UPDATE item SET stability = MAX(0.5, stability * 0.75) WHERE id = ?').run(id);
-    }
+    const row = db.prepare('SELECT * FROM item WHERE id = ?').get(id);
+    if (!row) continue;
+    const next = reviewItem(row, used === 1, cfg);
+    db.prepare('UPDATE item SET hit_count = hit_count + ?, last_access_at = ?, stability = ?, difficulty = ?, reviews = ?, lapses = ?, boost = ?, boost_at = ?, last_review_at = ? WHERE id = ?')
+      .run(used ? 1 : 0, nowMs(), next.stability, next.difficulty, next.reviews, next.lapses, next.boost, next.boost_at, next.last_review_at, id);
     store.shadow.append('item', db.prepare('SELECT * FROM item WHERE id = ?').get(id));
+    affected += 1;
   }
-  return { eventId: ev.id, used: used, items: ids.length, affected: ids.length };
+  return { eventId: ev.id, used: used, items: ids.length, affected: affected };
 }
 
 export function sweep(store, opts) {
@@ -620,4 +687,205 @@ export function itemList(store, partId, opts) {
     h.retention = Number(retentionOf(r, now, store.config).toFixed(4));
     return h;
   });
+}
+// ---- 主干强化：手工/自动给某条记忆加一把（stability 与 boost 同时乘）----
+export function reinforce(store, input) {
+  const db = store.db;
+  const cfg = store.config;
+  const row = db.prepare('SELECT * FROM item WHERE id = ?').get(String((input && input.id) || ''));
+  if (!row) throw new Error('unknown item: ' + (input && input.id));
+  const c = curveCfg(cfg);
+  const maxS = Number(c.maxStabilityDays || 3650);
+  const maxB = Math.max(1, Number(c.trunkBoostMax || 4));
+  const growth = Math.max(1, Number((input && input.strength) || c.reinforceGrowth || 1.2));
+  const now = nowMs();
+  const before = { stability: Number(row.stability || 0), boost: Number(row.boost || 1), difficulty: Number(row.difficulty || 0) };
+  const nextS = Math.min(maxS, Math.max(0.5, before.stability || Number(c.stabilityBaseDays || 7)) * growth);
+  const nextB = Math.min(maxB, Math.max(1, before.boost) * growth);
+  db.prepare('UPDATE item SET stability = ?, boost = ?, boost_at = ?, last_review_at = ?, last_access_at = ?, updated_at = ? WHERE id = ?')
+    .run(nextS, nextB, now, now, now, now, row.id);
+  const fresh = db.prepare('SELECT * FROM item WHERE id = ?').get(row.id);
+  store.shadow.append('item', fresh);
+  return { item: hydrate(fresh), before: before, after: { stability: Number(nextS.toFixed(3)), boost: Number(nextB.toFixed(3)) }, growth: growth, reason: String((input && input.reason) || 'manual') };
+}
+
+// ---- 主干快照：谁能豁免衰老、强化到什么程度 ----
+export function trunkSnapshot(store, partitionId) {
+  const cfg = store.config;
+  const c = curveCfg(cfg);
+  const now = nowMs();
+  const trunkMin = Number(c.trunkImportance || 4);
+  const sql = 'SELECT * FROM item WHERE deleted_at IS NULL AND state != ' + "'deleted'" + ' AND (pinned = 1 OR importance >= ?)' + (partitionId ? ' AND partition_id = ?' : '') + ' ORDER BY importance DESC, hit_count DESC, updated_at DESC';
+  const stmt = store.db.prepare(sql);
+  const rows = partitionId ? stmt.all(trunkMin, Number(partitionId)) : stmt.all(trunkMin);
+  return rows.map(function (r) {
+    return {
+      id: r.id, partition_id: r.partition_id, title: r.title, kind: r.kind, importance: Number(r.importance || 0), pinned: !!r.pinned,
+      stability: Number(Number(r.stability || 0).toFixed(2)), boost: Number(boostOf(r, cfg).toFixed(2)), effectiveStability: Number(effectiveStability(r, cfg).toFixed(2)),
+      retention: Number(retentionOf(r, now, cfg).toFixed(4)), reviews: Number(r.reviews || 0), lapses: Number(r.lapses || 0),
+      difficulty: Number(Number(r.difficulty === undefined || r.difficulty === null ? 5 : r.difficulty).toFixed(2)), last_review_at: r.last_review_at || null
+    };
+  });
+}
+
+// ---- 自动合并：向量相近的重复条目并成一条主干（默认只预演）----
+export function mergeSimilar(store, input) {
+  const o = input || {};
+  const db = store.db;
+  const cfg = store.config;
+  const threshold = Math.min(0.999, Math.max(0.3, Number(o.threshold || 0.6)));
+  const maxGroups = Math.max(1, Number(o.maxGroups || 20));
+  const sql = 'SELECT * FROM item WHERE deleted_at IS NULL AND state = ' + "'active'" + (o.partitionId ? ' AND partition_id = ?' : '');
+  const stmt = db.prepare(sql);
+  const rows = o.partitionId ? stmt.all(Number(o.partitionId)) : stmt.all();
+  const dims = Number((cfg.vector && cfg.vector.dims) || 256);
+  const vecs = rows.map(function (r) {
+    try { return vector.embedLocal(String(r.title || '') + ' ' + String(r.body || '').slice(0, 400), dims); }
+    catch (err) { return null; }
+  });
+  // 本地哈希向量对近义改写不敏感，所以再叠一层词面 Jaccard：取两者较大值
+  const sets = rows.map(function (r) { return new Set(tokenize(String(r.title || '') + ' ' + String(r.body || ''))); });
+  function simOf(i, j) {
+    let cos = 0;
+    if (vecs[i] && vecs[j]) cos = Math.max(0, vector.cosine(vecs[i], vecs[j]));
+    let inter = 0;
+    const a = sets[i]; const b = sets[j];
+    if (a.size && b.size) { for (const t of a) if (b.has(t)) inter += 1; }
+    const jac = (a.size && b.size) ? inter / (a.size + b.size - inter) : 0;
+    return Math.max(cos, jac);
+  }
+  const used = new Array(rows.length).fill(false);
+  const groups = [];
+  for (let i = 0; i < rows.length; i++) {
+    if (used[i] || !vecs[i]) continue;
+    const cluster = [i];
+    for (let j = i + 1; j < rows.length; j++) {
+      if (used[j] || !vecs[j]) continue;
+      if (simOf(i, j) >= threshold) cluster.push(j);
+    }
+    if (cluster.length < 2) continue;
+    for (const idx of cluster) used[idx] = true;
+    cluster.sort(function (a, b) {
+      const ra = rows[a]; const rb = rows[b];
+      return (Number(rb.importance || 0) - Number(ra.importance || 0)) || (Number(rb.hit_count || 0) - Number(ra.hit_count || 0)) || (Number(rb.updated_at || 0) - Number(ra.updated_at || 0));
+    });
+    const keeperIdx = cluster[0];
+    const keeper = rows[keeperIdx];
+    const members = cluster.slice(1).map(function (idx) {
+      return { id: rows[idx].id, title: rows[idx].title, score: Number(simOf(keeperIdx, idx).toFixed(4)) };
+    });
+    groups.push({ keeper: { id: keeper.id, title: keeper.title, partition_id: keeper.partition_id }, members: members });
+    if (groups.length >= maxGroups) break;
+  }
+  if (!o.apply) return { dryRun: true, threshold: threshold, candidates: rows.length, groups: groups, merged: 0 };
+  const now = nowMs();
+  let merged = 0;
+  const touched = [];
+  for (const g of groups) {
+    const keeper = db.prepare('SELECT * FROM item WHERE id = ?').get(g.keeper.id);
+    if (!keeper) continue;
+    const lines = [];
+    let importance = Number(keeper.importance || 0);
+    let pinned = Number(keeper.pinned || 0);
+    for (const m of g.members) {
+      const row = db.prepare('SELECT * FROM item WHERE id = ?').get(m.id);
+      if (!row) continue;
+      const snippet = String(row.body || '').replace(/\s+/g, ' ').slice(0, 160);
+      lines.push('· 合并自《' + String(row.title || '').slice(0, 60) + '》' + (snippet ? '：' + snippet : ''));
+      importance = Math.max(importance, Number(row.importance || 0));
+      pinned = pinned || Number(row.pinned || 0);
+      db.prepare('UPDATE item SET state = ' + "'archived'" + ', superseded_by = ?, updated_at = ? WHERE id = ?').run(keeper.id, now, row.id);
+      store.shadow.append('item', db.prepare('SELECT * FROM item WHERE id = ?').get(row.id));
+      merged += 1;
+    }
+    if (!lines.length) continue;
+    const body = String(keeper.body || '') + '\n\n—— 自动合并（' + new Date(now).toISOString().slice(0, 10) + '）\n' + lines.join('\n');
+    db.prepare('UPDATE item SET body = ?, importance = ?, pinned = ?, updated_at = ?, boost = MIN(?, COALESCE(boost, 1) * 1.1), boost_at = ? WHERE id = ?')
+      .run(body.slice(0, 12000), importance, pinned, now, Math.max(1, Number(cfg.curve.trunkBoostMax || 4)), now, keeper.id);
+    store.shadow.append('item', db.prepare('SELECT * FROM item WHERE id = ?').get(keeper.id));
+    touched.push(keeper.id);
+  }
+  return { dryRun: false, threshold: threshold, groups: groups, merged: merged, keepers: touched };
+}
+
+// ---- 任务收尾：把这次任务的结论并进分区主干，并加一把强化 ----
+export function archiveTrunk(store, input) {
+  const o = input || {};
+  const db = store.db;
+  const part = ensurePartition(store, { name: o.partition || o.partitionName, title: o.partitionTitle });
+  const now = nowMs();
+  const stamp = new Date(now).toISOString().slice(0, 16).replace('T', ' ');
+  const lines = ['## ' + stamp + ' · ' + String(o.title || '会话收尾')];
+  if (o.summary) lines.push(String(o.summary).trim());
+  const recent = db.prepare('SELECT id, title, body, kind, importance FROM item WHERE partition_id = ? AND deleted_at IS NULL AND state = ' + "'active'" + " AND kind NOT IN ('trunk','report') AND updated_at >= ?" + ' ORDER BY importance DESC, updated_at DESC LIMIT 8')
+    .all(part.id, now - 2 * 86400000);
+  for (const r of recent) {
+    const snippet = String(r.body || '').replace(/\s+/g, ' ').slice(0, 120);
+    lines.push('· ' + String(r.title || '').slice(0, 60) + (snippet ? '：' + snippet : ''));
+  }
+  const section = lines.join('\n');
+  const existing = db.prepare("SELECT * FROM item WHERE partition_id = ? AND kind = 'trunk' AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1").get(part.id);
+  let itemId = '';
+  let created = false;
+  if (existing) {
+    const body = (String(existing.body || '') + '\n\n' + section).slice(-12000);
+    db.prepare('UPDATE item SET body = ?, updated_at = ?, importance = 5, pinned = 1 WHERE id = ?').run(body, now, existing.id);
+    store.shadow.append('item', db.prepare('SELECT * FROM item WHERE id = ?').get(existing.id));
+    itemId = existing.id;
+  } else {
+    const res = remember(store, { partition: part.name, kind: 'trunk', title: '主干：' + part.name + ' 当前结论', body: section, importance: 5, pinned: true, tags: ['trunk'], source: 'trunk-archive' });
+    itemId = res.item.id;
+    created = true;
+  }
+  const boost = reinforce(store, { id: itemId, strength: Number(o.strength || store.config.curve.trunkBoostGrowth || 1.35), reason: 'task-archive' });
+  return { partition: part.name, itemId: itemId, created: created, consolidated: recent.length, boost: boost.after };
+}
+
+// ---- 检索评测：用条目自己的标题当查询，比较不同权重下的命中率与 token 成本 ----
+export function evalRetrieval(store, input) {
+  const o = input || {};
+  const db = store.db;
+  const cfg = store.config;
+  const part = o.partitionId ? { id: Number(o.partitionId), name: String(o.partition || '') } : ensurePartition(store, { name: o.partition });
+  const topK = Math.max(1, Number(o.topK || 5));
+  const limit = Math.max(1, Number(o.limit || 40));
+  const dims = Number((cfg.vector && cfg.vector.dims) || 256);
+  const idxChars = Number((cfg.recall && cfg.recall.indexBodyChars) || 90);
+  const charsPerToken = Number((cfg.tokens && cfg.tokens.charsPerToken) || 1.7);
+  const rows = db.prepare('SELECT * FROM item WHERE partition_id = ? AND deleted_at IS NULL AND state != ' + "'deleted'" + ' ORDER BY importance DESC, updated_at DESC LIMIT ?').all(part.id, limit);
+  const items = rows.map(function (r) {
+    const text = String(r.title || '') + ' ' + String(r.body || '');
+    return { row: r, tokens: tokenize(text), vec: vector.embedLocal(text.slice(0, 800), dims), ret: retentionOf(r, nowMs(), cfg), imp: Number(r.importance || 3) };
+  });
+  const variants = [
+    { name: 'current', wRel: Number(cfg.recall.weightRelevance || 1), vw: Number((cfg.vector && cfg.vector.vectorWeight) || 0) },
+    { name: 'keyword-only', wRel: Number(cfg.recall.weightRelevance || 1), vw: 0 },
+    { name: 'vector-heavy', wRel: Number(cfg.recall.weightRelevance || 1), vw: Math.min(2, Number((cfg.vector && cfg.vector.vectorWeight) || 0) * 2) }
+  ];
+  const out = variants.map(function (v) {
+    let hits = 0;
+    let tokens = 0;
+    let rr = 0;
+    for (const self of items) {
+      const q = tokenize(String(self.row.title || ''));
+      const scored = items.map(function (it) {
+        let overlap = 0;
+        if (q.length) {
+          const set = new Set(it.tokens);
+          let n = 0;
+          for (const t of q) if (set.has(t)) n += 1;
+          overlap = n / q.length;
+        }
+        const cos = v.vw > 0 ? Math.max(0, vector.cosine(vector.embedLocal(String(self.row.title || ''), dims), it.vec)) : 0;
+        const blended = v.wRel * overlap + v.vw * cos;
+        const score = blended * (0.35 + Number(cfg.recall.weightRetention || 0.65) * it.ret) * (0.7 + it.imp / 5) + (it.row.pinned ? Number(cfg.recall.pinnedBoost || 0.15) : 0);
+        return { id: it.row.id, score: score, chars: Math.min(idxChars, String(it.row.body || '').length) };
+      }).sort(function (a, b) { return b.score - a.score; }).slice(0, topK);
+      const rank = scored.findIndex(function (s) { return s.id === self.row.id; });
+      if (rank >= 0) { hits += 1; rr += 1 / (rank + 1); }
+      tokens += scored.reduce(function (n, s) { return n + s.chars; }, 0) / charsPerToken;
+    }
+    return { name: v.name, queries: items.length, hitRate: items.length ? Number((hits / items.length).toFixed(4)) : 0, mrr: items.length ? Number((rr / items.length).toFixed(4)) : 0, avgTokens: items.length ? Math.round(tokens / items.length) : 0 };
+  });
+  return { partition: part.name, topK: topK, queries: items.length, variants: out };
 }

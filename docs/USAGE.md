@@ -289,3 +289,40 @@ mem item pin --ids a,b,c        # 也支持 unpin / delete / restore
 ```
 
 看板里：条目表左侧有复选框（表头全选），选中后出现批量条（钉住 / 取消钉住 / 删除 / 恢复）；任意位置按 **Ctrl+K** 打开全局检索浮层，输入即搜当前分区，↑↓ 选、Enter 打开详情、Esc 关闭。
+
+## 19. 自适应曲线与主干强化（FSRS + 留存地板）
+
+曲线不再是纯指数衰减：
+
+- **普通条目**：`retention = exp(-Δt / stability)`，与以前一致；
+- **主干条目**（`pinned` 或 `importance >= curve.trunkImportance`）：`retention = floor + (1 - floor) * exp(-Δt / stability)`，`floor` 默认 `curve.trunkFloor = 0.55`——再久不用也不会跌破 55%；
+- **复习（FSRS 式）**：`feedback --used 1` 会让 `stability` 乘上 `[successFactorMin, successFactorMax]`（按难度插值，默认 1.15~2.6），`difficulty` 减 `difficultyStep`（默认 0.35）；`--used 0` 则 `stability *= lapseFactor`（0.45）、`difficulty` 加一档；
+- **主干强化**：主干条目复习成功时额外 `boost *= trunkBoostGrowth`（上限 `trunkBoostMax`），实际稳定度 = `stability * boost`；`boost` 会随时间按 `trunkBoostDecayDays`（默认 30 天）衰减回 1，所以强化不是永久白给。
+
+```bash
+mem trunk --partition myproject            # 主干快照：稳定度 / 强化系数 / 留存 / 复习次数 / 难度
+mem reinforce <itemId> --strength 1.5      # 手动强化（稳定度与 boost 同乘 1.5）
+mem forecast <itemId> --days 90            # 预测曲线：多少天后留存多少（主干不会破地板）
+```
+
+`endTask` 收尾时会自动把这次任务归档进主干（`archiveTrunk`：找 `kind='trunk'` 的条目追加一段，没有就新建），并顺带 `sweep` 一次。
+
+## 20. 闭环工具：日报 / 合并 / 评测 / 站点
+
+```bash
+mem daily --partition myproject --days 7    # 记忆健康日报（markdown 落 data/reports/）
+mem merge --partition myproject             # 相近记忆合并：默认只预演
+mem merge --partition myproject --apply     # 真的合并（被并入的条目 archived 且 superseded_by 指向保留者）
+mem eval --partition myproject --topK 5     # 检索评测：current / keyword-only / vector-heavy 三变体的 hitRate 与 MRR
+mem site --dir ./site                       # 导出静态 Markdown 站点（index.html + 每分区 md）
+```
+
+健康日报包含：每个分区的条目状态分布、平均留存、濒临遗忘数、近 N 天召回与命中率、守卫 ok/warn/block、主干数量与最高重要度、待补描述的附件，末尾附审查结论与建议。
+
+## 21. 装进 DSH（插件形态 + 原生面板）
+
+```bash
+dsh plugin --profile web add link:G:/华仔的小肥余专属工作区/xiaofeiyu-memory
+```
+
+插件会注册 13 个 `xfy_memory_*` 工具、挂 `/xfy-memory` 路由（与独立服务同一套 API），并在宿主带 `webServer` 时把 `lib/client.js` 注册成右侧栏的原生 React 面板；`agent/pre-step` 自动跑守卫、`agent/turn-stopping` 在 `autoSweep: true` 时自动清扫。安装细节、槽位与验证清单见 [DSH-PLUGIN.md](./DSH-PLUGIN.md)。

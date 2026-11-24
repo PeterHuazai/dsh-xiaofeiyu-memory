@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { nowMs, uid, atomicWrite, deepMerge, saveConfig } from './db.mjs';
-import { ensurePartition, remember, partitionByName, clamp } from './engine.mjs';
+import { nowMs, uid, atomicWrite, deepMerge, saveConfig, listBackups } from './db.mjs';
+import { ensurePartition, remember, partitionByName, clamp, archiveTrunk, sweep, trunkSnapshot, retentionOf, mergeSimilar, itemList, listPartitions, hitStats } from './engine.mjs';
+import { audit } from './guard.mjs';
 
 function slug(text) {
   return String(text || 'task').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'task';
@@ -121,6 +122,7 @@ export function endTask(store, input) {
   const o = input || {};
   const db = store.db;
   const row = taskRow(store, o.taskId || o.id);
+  const wasOpen = row.status !== 'done' && row.status !== 'aborted';
   const now = nowMs();
   db.prepare('UPDATE task SET status = ?, ended_at = ?, summary = ?, context_tokens = ? WHERE id = ?')
     .run(o.abort ? 'aborted' : 'done', now, String(o.summary || row.summary || ''), Number(o.tokens || row.context_tokens || 0), row.id);
@@ -137,7 +139,16 @@ export function endTask(store, input) {
       markdown: o.markdown
     });
   }
-  return { task: next, report: report };
+  let trunk = null;
+  let swept = null;
+  if (o.archive !== false && wasOpen) {
+    const part = partitionById(store, row.partition_id);
+    try {
+      trunk = archiveTrunk(store, { partition: part ? part.name : '', taskId: row.id, title: o.title || row.title, summary: o.summary || row.summary });
+    } catch (err) { trunk = { error: String((err && err.message) || err) }; }
+    try { swept = sweep(store, { partitionId: row.partition_id }); } catch (err) { swept = { error: String((err && err.message) || err) }; }
+  }
+  return { task: next, report: report, trunk: trunk, swept: swept };
 }
 
 export function partitionById(store, id) {
@@ -374,4 +385,162 @@ export function purgeReports(store, input) {
     store.shadow.append('report_delete', { id: r.id, hard: true, ts: nowMs(), reason: 'purge' });
   }
   return { purged: rows.length, filesRemoved: files, olderThanDays: days };
+}
+
+function esc(text) {
+  return String(text === null || text === undefined ? '' : text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;');
+}
+
+// ---- 记忆健康日报：一次生成 markdown，给 CLI / API / 看板共用 ----
+export function healthReport(store, input) {
+  const o = input || {};
+  const db = store.db;
+  const now = nowMs();
+  const days = Math.max(1, Math.min(365, Number(o.days || 7)));
+  const since = now - days * 86400000;
+  const cfg = store.config;
+  const fTh = Number(cfg.curve.forgetThreshold || 0.25);
+  const part = o.partition ? partitionByName(store, o.partition) : null;
+  const parts = part ? [part] : listPartitions(store);
+  const trunkMin = Number(cfg.curve.trunkImportance || 4);
+  const lines = [];
+  lines.push('# 小肥鱼记忆健康日报');
+  lines.push('');
+  lines.push('- 生成时间：' + new Date(now).toISOString().slice(0, 16).replace('T', ' ') + '（近 ' + days + ' 天窗口）');
+  lines.push('- 分区数：' + parts.length + (part ? '（只看 ' + part.name + '）' : ''));
+  lines.push('');
+  const totals = { active: 0, dormant: 0, archived: 0, pinned: 0, trunk: 0, stale: 0, recalls: 0, hits: 0, returned: 0, guardOk: 0, guardWarn: 0, guardBlock: 0 };
+  for (const pp of parts) {
+    const rows = db.prepare('SELECT * FROM item WHERE partition_id = ? AND deleted_at IS NULL').all(pp.id);
+    const byState = { active: 0, dormant: 0, archived: 0 };
+    let pinned = 0; let stale = 0; let retSum = 0; let counted = 0;
+    for (const r of rows) {
+      byState[r.state] = (byState[r.state] || 0) + 1;
+      if (r.pinned) pinned += 1;
+      const ret = retentionOf(r, now, cfg);
+      if (r.state !== 'archived') { retSum += ret; counted += 1; }
+      if (!r.pinned && Number(r.importance) < trunkMin && ret < fTh) stale += 1;
+    }
+    const trunk = trunkSnapshot(store, pp.id);
+    const stats = hitStats(store, pp.id, days * 24);
+    const g = db.prepare('SELECT level, COUNT(*) AS n FROM guard_event WHERE partition_id = ? AND ts >= ? AND deleted_at IS NULL GROUP BY level').all(pp.id, since);
+    const guard = { ok: 0, warn: 0, block: 0 };
+    for (const row of g) guard[row.level] = Number(row.n);
+    const cap = db.prepare("SELECT COUNT(*) AS n FROM attachment a JOIN item i ON i.id = a.item_id WHERE a.partition_id = ? AND i.deleted_at IS NULL AND (a.caption IS NULL OR a.caption = '')").get(pp.id);
+    const avgRet = counted ? retSum / counted : 0;
+    lines.push('## ' + String(pp.name || pp.title || pp.id) + (pp.title ? ' · ' + pp.title : ''));
+    lines.push('');
+    lines.push('- 条目：活跃 ' + (byState.active || 0) + ' · 休眠 ' + (byState.dormant || 0) + ' · 归档 ' + (byState.archived || 0) + ' · 钉住 ' + pinned);
+    lines.push('- 平均留存：' + (avgRet * 100).toFixed(1) + '% · 濒临遗忘（非主干）：' + stale + ' 条');
+    lines.push('- 近 ' + days + ' 天召回：' + stats.recalls + ' 次 · 命中率 ' + (Number(stats.hitRate || 0) * 100).toFixed(1) + '% · 返回条目 ' + stats.returned);
+    lines.push('- 守卫：ok ' + guard.ok + ' · warn ' + guard.warn + ' · block ' + guard.block);
+    lines.push('- 主干：' + trunk.length + ' 条' + (trunk.length ? '（最高 importance ' + trunk[0].importance + '，强化系数 ' + trunk[0].boost + '）' : ''));
+    lines.push('- 待补描述附件：' + Number(cap.n || 0));
+    totals.active += byState.active || 0; totals.dormant += byState.dormant || 0; totals.archived += byState.archived || 0;
+    totals.pinned += pinned; totals.trunk += trunk.length; totals.stale += stale;
+    totals.recalls += stats.recalls; totals.hits += stats.hits; totals.returned += stats.returned;
+    totals.guardOk += guard.ok; totals.guardWarn += guard.warn; totals.guardBlock += guard.block;
+    lines.push('');
+  }
+  const audited = audit(store, { partition: part ? part.name : '' });
+  const list = (audited && audited.findings) || [];
+  lines.push('## 审查结论');
+  lines.push('');
+  if (!list.length) lines.push('- 无异常');
+  for (const fd of list) lines.push('- [' + String(fd.severity || 'info') + '] ' + String(fd.kind || '') + '：' + String(fd.message || ''));
+  lines.push('');
+  const hitRate = totals.recalls ? totals.hits / totals.recalls : 0;
+  lines.push('## 建议');
+  lines.push('');
+  if (hitRate < Number((cfg.guard || {}).hitRateFloor || 0.25) && totals.recalls >= 5) lines.push('- 命中率 ' + (hitRate * 100).toFixed(1) + '% 低于阈值，建议收紧召回词或重算向量（mem reindex）');
+  if (totals.stale > 0) lines.push('- ' + totals.stale + ' 条记忆濒临遗忘且不是主干，可 mem sweep 或把它们写成一条主干结论');
+  if (totals.trunk === 0) lines.push('- 还没有主干记忆，建议 mem summarize 或任务收尾自动归档一次');
+  if (totals.guardBlock > 0) lines.push('- 出现 ' + totals.guardBlock + ' 次守卫 block，复盘最近那次为什么上下文爆掉');
+  const lastBackup = listBackups(store)[0];
+  if (!lastBackup) lines.push('- 还没有备份，建议 mem backup');
+  lines.push('');
+  const markdown = lines.join('\n');
+  let filePath = '';
+  try {
+    const dir = path.join(String(o.dir || store.paths.dataDir), 'reports');
+    fs.mkdirSync(dir, { recursive: true });
+    filePath = path.join(dir, stamp(now) + '-健康日报.md');
+    atomicWrite(filePath, markdown);
+  } catch (err) { filePath = ''; }
+  return { markdown: markdown, path: filePath, totals: totals, hitRate: Number(hitRate.toFixed(4)), days: days, partition: part ? part.name : '', findings: list };
+}
+
+// ---- 静态 Markdown 站点导出：一份自包含的 html + 每分区 md，可以拷走/托管 ----
+export function exportSite(store, input) {
+  const o = input || {};
+  const db = store.db;
+  const now = nowMs();
+  const cfg = store.config;
+  const parts = o.partition ? [partitionByName(store, o.partition)] : listPartitions(store);
+  const stampText = stamp(now);
+  const outDir = path.resolve(String(o.dir || path.join(store.paths.dataDir, 'site', stampText)));
+  fs.mkdirSync(outDir, { recursive: true });
+  const files = [];
+  const title = String(o.title || '小肥鱼记忆站点');
+  const html = [];
+  html.push('<!DOCTYPE html>');
+  html.push('<html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>' + esc(title) + '</title>');
+  html.push('<style>body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0;background:#0f1417;color:#e6edf3}');
+  html.push('header{padding:24px 32px;border-bottom:1px solid #24313a}h1{margin:0;font-size:22px}main{padding:24px 32px;max-width:1100px}');
+  html.push('h2{font-size:17px;margin:28px 0 10px;color:#9fd4c4}table{border-collapse:collapse;width:100%;font-size:13px}');
+  html.push('th,td{border-bottom:1px solid #1c262c;padding:6px 8px;text-align:left;vertical-align:top}');
+  html.push('th{color:#8b9aa6;font-weight:600}.tag{display:inline-block;padding:1px 6px;border-radius:4px;background:#1c262c;color:#8b9aa6;font-size:11px}');
+  html.push('.trunk{color:#e8c07a}.muted{color:#7b8b96}pre{white-space:pre-wrap;background:#141b20;padding:12px;border-radius:8px}</style></head><body>');
+  html.push('<header><h1>' + esc(title) + '</h1><div class=\"muted\">导出于 ' + new Date(now).toISOString().slice(0, 16).replace('T', ' ') + ' · 分区 ' + parts.length + ' 个</div></header><main>');
+  const summary = [];
+  for (const pp of parts) {
+    const rows = itemList(store, pp.id, { limit: 2000, includeArchived: true });
+    const trunk = trunkSnapshot(store, pp.id);
+    html.push('<h2 id=\"p-' + esc(pp.name) + '\">' + esc(pp.title || pp.name) + ' <span class=\"tag\">' + esc(pp.name) + '</span></h2>');
+    html.push('<div class=\"muted\">条目 ' + rows.length + ' · 主干 ' + trunk.length + '</div>');
+    html.push('<table><thead><tr><th>标题</th><th>类型</th><th>重要度</th><th>留存</th><th>更新时间</th></tr></thead><tbody>');
+    for (const it of rows) {
+      html.push('<tr><td>' + (it.pinned ? '<span class=\"trunk\">★</span> ' : '') + esc(it.title) + '</td>');
+      html.push('<td class=\"muted\">' + esc(it.kind) + '</td><td>' + Number(it.importance || 0) + '</td>');
+      html.push('<td>' + (Number(it.retention || 0) * 100).toFixed(0) + '%</td>');
+      html.push('<td class=\"muted\">' + new Date(Number(it.updated_at || now)).toISOString().slice(0, 10) + '</td></tr>');
+    }
+    html.push('</tbody></table>');
+    const md = [];
+    md.push('# ' + String(pp.title || pp.name));
+    md.push('');
+    md.push('> 分区 `' + String(pp.name) + '` · 条目 ' + rows.length + ' · 主干 ' + trunk.length);
+    md.push('');
+    if (trunk.length) {
+      md.push('## 主干');
+      md.push('');
+      for (const t of trunk) md.push('- **' + String(t.title) + '**（重要度 ' + t.importance + '，留存 ' + (Number(t.retention || 0) * 100).toFixed(0) + '%，强化系数 ' + t.boost + '）');
+      md.push('');
+    }
+    md.push('## 全部条目');
+    md.push('');
+    for (const it of rows) {
+      md.push('### ' + String(it.title));
+      md.push('');
+      md.push('- 类型 ' + it.kind + ' · 重要度 ' + it.importance + ' · 留存 ' + (Number(it.retention || 0) * 100).toFixed(0) + '% · 更新 ' + new Date(Number(it.updated_at || now)).toISOString().slice(0, 10));
+      if (it.tags && it.tags.length) md.push('- 标签 ' + it.tags.join(', '));
+      md.push('');
+      md.push(String(it.body || '').slice(0, 4000));
+      md.push('');
+    }
+    const mdName = 'partition-' + String(pp.name).replace(/[^a-zA-Z0-9_-]+/g, '-') + '.md';
+    atomicWrite(path.join(outDir, mdName), md.join('\n'));
+    files.push(mdName);
+    html.push('<p><a class=\"muted\" href=\"./' + mdName + '\">下载本分区 Markdown</a></p>');
+    summary.push({ partition: pp.name, items: rows.length, trunk: trunk.length, file: mdName });
+  }
+  const reports = db.prepare('SELECT id, title, path, summary, created_at FROM report WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 50').all();
+  html.push('<h2>最近汇报</h2><table><thead><tr><th>标题</th><th>时间</th><th>摘要</th></tr></thead><tbody>');
+  for (const r of reports) html.push('<tr><td>' + esc(r.title) + '</td><td class=\"muted\">' + new Date(Number(r.created_at || now)).toISOString().slice(0, 10) + '</td><td class=\"muted\">' + esc(String(r.summary || '').slice(0, 120)) + '</td></tr>');
+  html.push('</tbody></table>');
+  html.push('<h2>参数</h2><pre>' + esc(JSON.stringify({ curve: cfg.curve, recall: cfg.recall, vector: cfg.vector && { enabled: cfg.vector.enabled, dims: cfg.vector.dims, vectorWeight: cfg.vector.vectorWeight } }, null, 2)) + '</pre>');
+  html.push('</main></body></html>');
+  atomicWrite(path.join(outDir, 'index.html'), html.join('\n'));
+  files.push('index.html');
+  return { dir: outDir, files: files, partitions: summary, reports: reports.length, bytes: fs.statSync(path.join(outDir, 'index.html')).size };
 }
