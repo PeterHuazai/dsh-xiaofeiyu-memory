@@ -9,7 +9,7 @@ The two things that break multi-turn, long-running conversations most often — 
 separate* and *forgetting what should never have been kept* — are both handled deliberately here.
 
 > A note from the author: this plugin was written by a **student with no AI background** who was playing
-> around with DeepSeek Harness. It really works (187 automated tests pass), but the design has plenty of room
+> around with DeepSeek Harness. It really works (201 automated tests pass), but the design has plenty of room
 > to grow. Feedback is welcome. 🙏
 
 ---
@@ -154,7 +154,7 @@ src/db.mjs          SQLite schema + shadow log + backups + config
 src/engine.mjs      tokenizer, forgetting curve, remember/recall/feedback, layers, trunk digest, consolidate, attachments
 src/vector.mjs      local hash vectors + semantic fingerprints + backend probing + ANN
 src/guard.mjs       guard scoring and audit, one-click fix (planFix / applyFix)
-src/harness.mjs     DSH session scanning and import (multi-frame zstd, one project → one partition)
+src/harness.mjs     DSH session scanning and import (multi-frame zstd, one project → one partition; accepts partition name or dir name; body lists files and tools)
 src/tasks.mjs       task gate, report lifecycle, import/export, config clamping
 src/vision.mjs      multimodal captions (optional vision model)
 src/tools.mjs       search/digest/explain/link/expand/pin/health/dedupe/summarize
@@ -162,7 +162,7 @@ src/server.mjs      HTTP API + static dashboard
 src/cli.mjs         command line
 web/index.html      dashboard (single inlined file)
 docs/DSH-PLUGIN.md  plugin halves, slots, waterfall contract, install and verification
-tests/run-tests.mjs 187 assertions
+tests/run-tests.mjs 201 assertions
 ```
 
 ## Configuration (all editable in the dashboard; `updateConfig` clamps to sane ranges)
@@ -198,7 +198,7 @@ tests/run-tests.mjs 187 assertions
 ## Tests
 
 ```bash
-node tests/run-tests.mjs             # 187 passed / 0 failed
+node tests/run-tests.mjs             # 201 passed / 0 failed
 node tests/plugin-smoke.mjs          # plugin smoke: 14 tools register, fix plan, first-turn injection (26 PASS)
 node tests/client-panel.test.mjs     # panel rendering and request URLs (107 assertions)
 node tests/cordis-waterfall.test.mjs # waterfall contract against the real cordis library (5 assertions)

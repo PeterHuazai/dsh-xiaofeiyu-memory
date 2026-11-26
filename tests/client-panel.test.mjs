@@ -55,6 +55,9 @@ ok(!/require\(\s*['"]@deepseek-ai/.test(src), '没有 require @deepseek-ai/*');
 const externals = (src.match(/https?:\/\/[^\s'"\x60)]+/g) || []).filter(function (u) { return u.indexOf('127.0.0.1') < 0 && u.indexOf('localhost') < 0; });
 ok(externals.length === 0, 'bundle 里没有出网的外部 http(s) 地址', externals.join(', '));
 console.log('  外部地址扫描：' + (externals.length ? externals.join(', ') : '无（只有 127.0.0.1 兜底）'));
+// 导入必须传「分区名」：面板以前传的是会话目录名（--G-~6BD5…--），后端只认分区名 → 永远导入 0 条。
+ok(src.indexOf('dryRun(keyOf(r))') >= 0, '面板「预演」传分区名而不是目录名');
+ok(src.indexOf('doImport(keyOf(current))') >= 0, '面板「确认导入」同样传分区名');
 
 // ---------------------------------------------------------------------------
 section('2 · 用假 __ModuleLoader__ 装载 bundle');

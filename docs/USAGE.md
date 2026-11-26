@@ -276,11 +276,14 @@ mem harness import --sessions s-abc,s-def --confirm  # 只导指定几条
 规则：
 
 - **一个项目一个分区**，分区名 = 项目目录末段（同名分区直接复用，不新建）；分区 description 记 `harness:<cwd>` 做归属标记，同名不同路径会自动加 `-<hash6>` 后缀。
-- 每条会话写成一条 `kind='note'` 的摘要记忆（会话 id、项目、时间、轮次、标题、首条需求、最后结论，原文进 body 截断），按内容 hash 去重，重复导入会 skip。
-- 空会话（没有 user 也没有 assistant）默认跳过；`--force` 才会连已导入的也重写。
+- 每条会话写成一条 `kind='scene'`、`importance=4` 的场景记忆（v0.2.3 起；以前是 `note`/3）——所以它会出现在「主干摘要」里，下次开新会话第一轮自动带一句。
+- 正文结构：会话 id / 时间 / 轮次统计 / 标题 / **用户需求**（只取用户自己打的字）/ 后续要求 / **改动过的文件** / **用到的文件** / **主要工具** / 最后结论 / 备注 / 原始日志。`run_code`、`pwsh` 这类把路径写在代码里的调用也能抽出文件（逐行判断，只有和 `Set-Content`/`tools.write(` 等写操作同行的路径才算“改动过”）。
+- **审批策略通知、运行时上下文快照（`<system-reminder>`）、子代理自我说明都不算用户需求**（v0.2.3 修：以前会把 “The user changed the approval policy…” 当成首条需求记进去）。
+- `--project` 现在**分区名 / 项目名 / cwd / 会话目录名（含 `~XXXX` 解码）** 都认。以前面板传的是目录名 `--G-~6BD5~…--`，后端只认分区名，于是永远「导入 0 条」——这个 bug 在 v0.2.3 修掉了。
+- 按内容 hash 去重，重复导入会 skip；空会话（没有 user 也没有 assistant）默认跳过；`--force` 才会连已导入的也重写。
 - 不带 `--confirm` 只预演：返回 `{dryRun:true, wouldImport, skipped, plan}`，一行都不写。
 
-看板第 14 个板块「DSH 会话」就是它的图形界面：勾选项目/会话 → 预演 → 确认导入。
+看板第 14 个板块「DSH 会话」就是它的图形界面：点项目行看会话 → 预演 → 确认导入（按钮传的是分区名，不再是目录名）。
 
 ## 18. 批量操作与 Ctrl+K
 
@@ -378,6 +381,8 @@ mem fix --partition myproject --apply --step sweep,trunk,backup,cleanup,merge
 
 历史 bug：`recall` / `trunkDigest` / `planFix` / `checkGuard` 这类读入口内部调的是 `ensurePartition`，分区名打错（或者把分区 id 当名字传）会**静默建出一个空分区**，之后你会在 `mem partition list` 里看到 `1  1` 这种垃圾行。
 
+现在读操作走 `requirePartition`：分区不存在直接报 `unknown partition: xxx（先 mem partition add ...）`，不会建任何东西；只有真正的写入入口（`mem remember`、`mem task start`、`mem import`）保留「自动建分区」。工具层的 `xfy_memory_*` 走同样的严格规则。
+
 ### 22.4 脚手架条目不算知识
 
 `mem task start` 会种一条「任务开启：…」（`kind='task'`、正文为空）的索引条目。它以前会：
@@ -389,4 +394,12 @@ mem fix --partition myproject --apply --step sweep,trunk,backup,cleanup,merge
 现在这些条目**不进召回候选、不进主干归档、不进合并候选**（主干归档同时排除 `report` / `scene`：主干只放结论、决策、约束）。
 但条目本身还在库里，`mem search --partition <分区> "任务开启"` 依然翻得到，方便追溯这个任务开过没有。
 
-现在读操作走 `requirePartition`：分区不存在直接报 `unknown partition: xxx（先 mem partition add ...）`，不会建任何东西；只有真正的写入入口（`mem remember`、`mem task start`、`mem import`）保留「自动建分区」。工具层的 `xfy_memory_*` 走同样的严格规则。
+### 22.5 会话导入修好了（v0.2.3）
+
+「看板里点导入，永远导入 0 条」的根因是两边写法不一致：面板传会话目录名（`--G-~6BD5~4E1A…--`），后端只按分区名/项目名匹配。现在：
+
+- 后端 `matchesProject` 认**目录名（原始 + `~XXXX` 解码）/ cwd / 项目名 / 分区名**四种写法；
+- 面板「预演 / 确认导入」改传**分区名**；
+- 目录名解码修了（以前 `~XXXX~` 要求前后都有波浪号，会漏掉最后一个字）。
+
+顺手修了内容质量三件事（详见第 17 节）：只把用户自己打的字当「用户需求」、正文补「改动过的文件 / 用到的文件 / 主要工具」、入库层级从 `note`/3 改成 `scene`/4。

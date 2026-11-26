@@ -606,6 +606,47 @@ ok((mergeDry.groups || []).every(function (g) { return g.keeper && g.keeper.kind
 const scafFind = xfy.searchItems(store, { partition: pScaf, q: '任务开启' });
 ok(scafFind.items.some(function (it) { return it.kind === 'task'; }), '「任务开启」仍能用 search 翻到（只是不参与召回/主干/合并）', scafFind.items.length);
 
+// 42 v0.2.3 会话导入：目录名也能匹配、系统提醒不算需求、正文带文件与工具、按场景层入库
+const HS2 = path.join(TMP, 'hsess2');
+const DIR2 = '--G-~6BD5~4E1A~8BBE~8BA1~62A5~544A--';
+const hDir2 = path.join(HS2, DIR2, 'session-x1');
+fs.mkdirSync(hDir2, { recursive: true });
+const ev2 = [
+  { type: 'session', id: 'session-x1', version: 4, cwd: 'G:\\毕业设计报告', createdAt: 1700000000000 },
+  { type: 'session/title', time: 1700000001000, data: { title: '帮我做毕业设计' } },
+  { type: 'user/message', time: 1700000002000, data: { content: [{ type: 'text', text: 'The user changed the approval policy from "ask the user for approval" to "never ask the user for approval".' }], source: { kind: 'user-approval' } } },
+  { type: 'user/message', time: 1700000002100, data: { content: [{ type: 'text', text: '<system-reminder>\n运行时上下文\n</system-reminder>' }], source: { kind: 'runtime-context', form: 'snapshot' } } },
+  { type: 'user/message', time: 1700000003000, data: { content: [{ type: 'text', text: '帮我做带地图的可视化交通预测' }], source: { kind: 'user' } } },
+  {
+    type: 'tool/call', time: 1700000004000, data: {
+      name: 'run_code',
+      arguments: JSON.stringify({ code: 'const r = await tools.read({ file_path: "G:\\\\毕业设计报告\\\\开题报告.docx" });\nawait tools.pwsh({ description: "写探针", command: "Set-Content -Path G:\\\\毕业设计报告\\\\_probe\\\\p.py -Value 1" });' })
+    }
+  },
+  { type: 'assistant/message', time: 1700000005000, data: { message: { content: [{ type: 'text', text: '开题报告已读完，下一步搭地图' }] } } }
+];
+fs.writeFileSync(path.join(hDir2, 'session.v4.jsonl.zstd'), zlib.zstdCompressSync(Buffer.from(ev2.map(function (e) { return JSON.stringify(e); }).join('\n') + '\n', 'utf8')));
+eq(harness.decodeDirName(DIR2), '毕业设计报告', '目录名解码还原成中文项目名');
+const scan2 = harness.scanHarness(store, { root: HS2 });
+const proj2 = scan2.projects[0];
+ok(!!proj2 && proj2.partition === '毕业设计报告', '扫描出的分区名是中文项目名', proj2 && proj2.partition);
+ok(harness.matchesProject(proj2, DIR2), '用目录名能匹配到项目（面板以前传的就是它）');
+ok(harness.matchesProject(proj2, '毕业设计报告'), '用分区名能匹配到项目');
+ok(harness.matchesProject(proj2, 'G:\\毕业设计报告'), '用 cwd 能匹配到项目');
+ok(!harness.matchesProject(proj2, '不存在的项目'), '不相干的写法匹配不上');
+const dry2 = harness.importHarness(store, { root: HS2, project: DIR2 });
+ok(dry2.dryRun === true && dry2.wouldImport === 1, '预演：按目录名也能算出「将导入 1 条」（老版本这里是 0）', dry2);
+const real2 = harness.importHarness(store, { root: HS2, project: DIR2, confirmed: true });
+ok(real2.dryRun === false && real2.imported === 1, '确认后按目录名真的导入了', real2);
+const hItem2 = store.db.prepare("SELECT * FROM item WHERE source = 'harness:session-x1'").get();
+ok(!!hItem2 && hItem2.kind === 'scene' && Number(hItem2.importance) === 4, '会话记忆按场景层入库（scene / importance 4）', hItem2 && { kind: hItem2.kind, importance: hItem2.importance });
+const hBody2 = String(hItem2 && hItem2.body);
+ok(hBody2.indexOf('帮我做带地图的可视化交通预测') >= 0, '正文里的「用户需求」是用户自己打的字');
+ok(hBody2.indexOf('approval policy') < 0 && hBody2.indexOf('<system-reminder>') < 0, '审批策略通知 / 运行时上下文没有混进正文');
+ok(/改动过的文件：.*_probe/.test(hBody2), '正文标出同一行写操作过的文件', hBody2.split('\n').filter(function (l) { return l.indexOf('改动过的文件') === 0; })[0]);
+ok(/用到的文件：.*开题报告\.docx/.test(hBody2), '正文列出读取过的文件');
+ok(/主要工具：run_code×1/.test(hBody2), '正文带工具使用统计');
+
 console.log('\n通过 ' + pass + ' / 失败 ' + fail);
 if (fail) { console.log(failures.join('\n')); process.exit(1); }
 // Windows 上数据库句柄未关时删不掉临时目录

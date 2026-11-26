@@ -44,9 +44,13 @@ export function slugOf(name) {
   return out.join('').replace(/-+/g, '-').replace(/^-+/, '').replace(/-+$/, '').toLowerCase();
 }
 
+// DSH 的会话目录名是 `--<盘符>-~XXXX~XXXX…--`：每个非 ASCII 字符编成一个 `~XXXX` 单元，
+// 单元之间**不**共享波浪号。旧实现要求 `~XXXX~`（前后都有波浪号），会漏解最后一个字，
+// 所以这里按「波浪号前缀」逐单元解，并把盘符前缀去掉，直接得到项目名。
 export function decodeDirName(dir) {
   const raw = String(dir || '').replace(/^-+/, '').replace(/-+$/, '');
-  return raw.replace(/~([0-9a-fA-F]{4})~/g, function (_m, h) { return String.fromCharCode(parseInt(h, 16)); });
+  const text = raw.replace(/~([0-9a-fA-F]{4})/g, function (_m, h) { return String.fromCharCode(parseInt(h, 16)); });
+  return text.replace(/^[A-Za-z]:?[-_ ]+/, '');
 }
 
 function textParts(content) {
@@ -70,6 +74,85 @@ function cleanTitle(s) {
   return flat(String(s || '').replace(/^#+\s*/, ''), 90);
 }
 const SUBAGENT_NOTE = 'Your parent agent id is';
+const APPROVAL_NOTE = 'The user changed the approval policy';
+const SYSTEM_WRAP = /^\s*<system-reminder>/;
+
+// 只有用户**自己**打的字才算需求：审批策略通知、运行时上下文快照、子代理自我说明都不算。
+function realUserText(source, text) {
+  const kind = String((source || {}).kind || '');
+  if (kind && kind !== 'user') return '';
+  const t = String(text || '');
+  if (!t.trim()) return '';
+  if (SYSTEM_WRAP.test(t)) return '';
+  if (t.indexOf(APPROVAL_NOTE) >= 0) return '';
+  if (t.indexOf(SUBAGENT_NOTE) >= 0) return '';
+  return t;
+}
+
+const PATH_KEY_RE = /^(file_path|path|cwd|file|filepath|target|dest|destination|source_path|output_path|folder|dir)$/i;
+const CODE_KEY_RE = /^(code|command|script|query|input|cmd|content|text|body|patch)$/i;
+const WRITE_TOOL_RE = /write|edit|patch|apply|create|save|attach|upload|delete|remove|move|rename/i;
+const WRITE_HINT_RE = /tools\.(write|edit)\(|Set-Content|Out-File|Add-Content|New-Item|Remove-Item|Move-Item|Copy-Item|git\s+apply|writeFileSync|fs\.write/i;
+
+function looksLikePath(s) {
+  return /[\\/]/.test(s) && s.length >= 3 && !/^\s*(https?|data|dsh-[a-z]+|node|file):/i.test(s);
+}
+
+// 从一段自由文本（run_code 的 code、pwsh 的 command）里捞 Windows 盘符路径 / 绝对路径。
+function extractPathsFromText(text) {
+  const out = [];
+  const s = String(text || '').replace(/\\\\/g, '\\').replace(/\\"/g, '"');
+  const win = s.match(/[A-Za-z]:\\[^\s"'`,;)\]}{|]{2,180}/g);
+  if (win) for (const one of win) out.push(one.replace(/[\\/]+$/, ''));
+  const posix = s.match(/(?:^|[\s"'(=])(\/[A-Za-z0-9_\-.@\u4e00-\u9fff]{2,120}(?:\/[A-Za-z0-9_\-.@\u4e00-\u9fff]{1,120})*)/g);
+  if (posix) for (const raw of posix) out.push(raw.replace(/^[\s"'(=]+/, '').replace(/[\\/]+$/, ''));
+  return out;
+}
+
+// 从工具调用的 arguments 里挖文件路径（parse 得动就走对象树，parse 不动就退回正则）。
+// 返回 { paths, writes }：writes 只在调用像是写操作时才收。
+function collectPaths(argsText, acc) {
+  const raw = String(argsText || '');
+  let args = null;
+  try { args = JSON.parse(raw); } catch (err) { args = null; }
+  if (args === null) {
+    for (const one of extractPathsFromText(raw)) acc.paths.push(one);
+    return;
+  }
+  const walk = function (v, key, lvl) {
+    if (v === null || v === undefined || lvl > 5) return;
+    if (typeof v === 'string') {
+      const k = String(key || '');
+      if (k && PATH_KEY_RE.test(k) && looksLikePath(v)) { acc.paths.push(v.trim()); return; }
+      if (k && CODE_KEY_RE.test(k) && v.length > 12) {
+        // 逐行判断：只有和写操作出现在**同一行**的路径才算“改过这个文件”，
+        // 否则一个 run_code 里只要出现过 Set-Content，就会把所有引用文件都当成改过的。
+        for (const line of String(v).split(/\r?\n/)) {
+          const found = extractPathsFromText(line);
+          const writes = WRITE_HINT_RE.test(line);
+          for (const one of found) { acc.paths.push(one); if (writes) acc.writes.push(one); }
+        }
+      }
+      return;
+    }
+    if (Array.isArray(v)) { for (const it of v.slice(0, 60)) walk(it, key, lvl + 1); return; }
+    if (typeof v === 'object') { for (const k of Object.keys(v)) walk(v[k], k, lvl + 1); }
+  };
+  walk(args, '', 0);
+}
+
+function uniq(list, cap) {
+  const seen = Object.create(null);
+  const out = [];
+  for (const one of list) {
+    const s = String(one || '').trim();
+    if (!s || seen[s]) continue;
+    seen[s] = true;
+    out.push(s);
+    if (out.length >= (cap || 20)) break;
+  }
+  return out;
+}
 
 export function parseSession(file) {
   const buf = fs.readFileSync(file);
@@ -86,21 +169,43 @@ export function parseSession(file) {
   let toolCalls = 0;
   let turns = 0;
   let updatedAt = head.createdAt || 0;
-  for (const e of evs) {
+  const toolCounts = Object.create(null);
+  const allPaths = [];
+  const writePaths = [];
+  const userTexts = [];
+  let lastAssistantAt = -1;
+  let lastToolAt = -1;
+  for (let idx = 0; idx < evs.length; idx += 1) {
+    const e = evs[idx];
     if (!e || !e.type) continue;
     if (typeof e.time === 'number' && e.time > updatedAt) updatedAt = e.time;
     if (e.type === 'session/title' && !title) title = cleanTitle((e.data || {}).title || '');
     else if (e.type === 'turn/start') turns += 1;
-    else if (e.type === 'tool/call') toolCalls += 1;
-    else if (e.type === 'user/message' && !firstUser) {
-      const t = textParts((e.data || {}).content);
-      if (t && t.indexOf(SUBAGENT_NOTE) < 0) firstUser = t;
+    else if (e.type === 'tool/call') {
+      toolCalls += 1;
+      lastToolAt = idx;
+      const name = String((e.data || {}).name || 'tool');
+      toolCounts[name] = (toolCounts[name] || 0) + 1;
+      const acc = { paths: [], writes: [] };
+      collectPaths((e.data || {}).arguments, acc);
+      for (const one of acc.paths) allPaths.push(one);
+      if (WRITE_TOOL_RE.test(name)) for (const one of acc.paths) writePaths.push(one);
+      for (const one of acc.writes) { allPaths.push(one); writePaths.push(one); }
+    } else if (e.type === 'user/message') {
+      const data = e.data || {};
+      const t = textParts(data.content);
+      const real = realUserText(data.source, t);
+      if (real) {
+        if (userTexts.length < 6) userTexts.push(flat(real, 900));
+        if (!firstUser) firstUser = real;
+      }
     } else if (e.type === 'assistant/message') {
       const t = textParts(((e.data || {}).message || {}).content);
-      if (t.trim()) lastAssistant = t;
+      if (t.trim()) { lastAssistant = t; lastAssistantAt = idx; }
     }
   }
   const cwd = String(head.cwd || '') || '';
+  const tools = Object.keys(toolCounts).sort(function (a, b) { return toolCounts[b] - toolCounts[a]; }).slice(0, 8).map(function (k) { return k + '×' + toolCounts[k]; });
   return {
     id: String(head.id || path.basename(path.dirname(file)) || ''),
     cwd: cwd,
@@ -108,7 +213,13 @@ export function parseSession(file) {
     parentSession: head.parentSession ? String(head.parentSession) : '',
     title: title || cleanTitle(firstUser) || '(未命名会话)',
     firstUser: flat(firstUser, 700),
+    userTexts: userTexts,
+    files: uniq(allPaths, 14),
+    filesWritten: uniq(writePaths, 10),
+    tools: tools,
+    toolCounts: toolCounts,
     lastAssistant: flat(lastAssistant, 700),
+    endedWithTools: lastToolAt >= 0 && lastToolAt > lastAssistantAt,
     createdAt: Number(head.createdAt || 0),
     updatedAt: Number(updatedAt || head.createdAt || 0),
     toolCalls: toolCalls,
@@ -219,23 +330,52 @@ export function sessionBody(s, partitionName) {
   lines.push('时间：' + stampOf(s.createdAt) + ' → ' + stampOf(s.updatedAt) + '，' + s.turns + ' 轮 / ' + s.toolCalls + ' 次工具调用 / ' + s.events + ' 条事件');
   if (partitionName) lines.push('分区：' + partitionName);
   lines.push('标题：' + s.title);
-  if (s.firstUser) lines.push('首条需求：' + s.firstUser);
+  if (s.firstUser) lines.push('用户需求：' + s.firstUser);
+  const extra = Array.isArray(s.userTexts) ? s.userTexts.slice(1, 4) : [];
+  for (let i = 0; i < extra.length; i += 1) lines.push('后续要求 ' + (i + 2) + '：' + extra[i]);
+  if (Array.isArray(s.filesWritten) && s.filesWritten.length) lines.push('改动过的文件：' + s.filesWritten.join('、'));
+  if (Array.isArray(s.files) && s.files.length) lines.push('用到的文件：' + s.files.join('、'));
+  if (Array.isArray(s.tools) && s.tools.length) lines.push('主要工具：' + s.tools.join('、'));
   if (s.lastAssistant) lines.push('最后结论：' + s.lastAssistant);
+  if (s.endedWithTools) lines.push('备注：会话在工具调用中结束，没有收尾说明（“最后结论”是较早的一句）');
   lines.push('原始日志：' + s.file);
-  return lines.join('\n').slice(0, 2400);
+  return lines.join('\n').slice(0, 3000);
+}
+
+// 一个项目能被哪些写法匹配上：目录名（原始/解码后）、cwd、项目名、分区名。
+// 面板以前只传目录名，后端只认分区名/项目名 → 永远 0 条；这里把两边都认下来。
+export function projectKeys(proj) {
+  const list = [proj.dir, decodeDirName(proj.dir), proj.cwd, proj.name, proj.partition];
+  return uniq(list.map(function (v) { return String(v || '').trim(); }), 10);
+}
+
+export function matchesProject(proj, wanted) {
+  const w = String(wanted || '').trim();
+  if (!w) return true;
+  const ws = slugOf(w);
+  const cwd = String(proj.cwd || '').replace(/[\\/]+$/, '');
+  for (const k of projectKeys(proj)) {
+    if (k === w) return true;
+    if (k.toLowerCase() === w.toLowerCase()) return true;
+    if (ws && slugOf(k) === ws) return true;
+  }
+  if (cwd && (cwd.endsWith('\\' + w) || cwd.endsWith('/' + w))) return true;
+  return false;
 }
 
 export function importHarness(store, input) {
   const opts = input || {};
   const base = harnessRoot(opts.root);
   const wanted = Array.isArray(opts.sessions) ? opts.sessions.map(String) : null;
-  const onlyProject = opts.project ? slugOf(opts.project) : '';
+  const onlyProject = opts.project ? String(opts.project) : '';
+  const kind = String(opts.kind || 'scene');
+  const importance = opts.importance === undefined ? 4 : Number(opts.importance);
   const force = !!opts.force;
   const scan = scanHarness(store, { root: base });
   const seen = importedIds(store);
   const plan = [];
   for (const proj of scan.projects) {
-    if (onlyProject && proj.partition !== onlyProject && slugOf(proj.name) !== onlyProject) continue;
+    if (onlyProject && !matchesProject(proj, onlyProject)) continue;
     for (const s of proj.sessions) {
       if (wanted && wanted.indexOf(s.id) < 0) continue;
       const already = !!seen[s.id];
@@ -263,8 +403,8 @@ export function importHarness(store, input) {
       partition: part.name,
       title: '会话：' + p.session.title,
       body: sessionBody(p.session, part.name),
-      kind: 'note',
-      importance: 3,
+      kind: kind,
+      importance: importance,
       tags: ['harness', part.name],
       source: 'harness:' + p.sessionId
     });
